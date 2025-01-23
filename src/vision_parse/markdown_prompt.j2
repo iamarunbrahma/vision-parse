@@ -1,6 +1,6 @@
 {% autoescape true %}
 
-Your task is to analyze the given image and extract textual content in markdown format.
+Your task is to analyze the given image (which is a page from a PDF) and extract textual content in markdown format.
 
 {% if confidence_score_text is defined and confidence_score_text|float > 0.6 %}
 - Verify if the extracted text matches with the content in the image:\n\n```markdown\n{{ extracted_text|escape|trim }}\n```\n\n
@@ -13,19 +13,19 @@ Your task is to analyze the given image and extract textual content in markdown 
 {% endif %}
 
 {% if tables_detected is defined and tables_detected|string == "Yes" %}
-- If tables are detected, preserve the tabular structure in markdown format using | for columns and - for the header row separator.
+- If tables are detected in the PDF, convert them to **HTML** format using `<table>`, `<thead>`, `<tbody>`, `<tr>`, `<th>`, and `<td>` elements.
 - Ensure that the cell values are properly aligned within the table columns and the tabular data is not distorted.
-- Maintain the original positioning of the table within the scanned document. Strictly do not include any additional explanations or comments.
+- Maintain the original table positioning as closely as possible to reflect the scanned document. Strictly do not include any additional explanations or comments.
 {% endif %}
 
 {% if latex_equations_detected is defined and latex_equations_detected|string == "Yes" %}
-- If latex equations are detected, preserve the inline math equations and block math equations in LaTeX format using math symbols, superscripts, subscripts, and other LaTeX formatting.
+- If latex equations are detected, retain the inline math equations and block math equations in LaTeX format using math symbols, superscripts, subscripts, and other LaTeX formatting.
 - If inline equations are detected, strictly enclose them in single dollar signs i.e. $...$ and if block equations are detected, strictly enclose them in double dollar signs i.e. $$...$$.
 - Strictly ensure that the LaTeX formatting is valid. Strictly do not include any additional explanations or comments.
 {% endif %}
 
-- Strictly preserve markdown text formatting if present such as horizontal lines, header levels, footers, bullet points, links/urls, or other markdown elements.
-- Strictly, do not omit any textual content from the markdown formatted extracted text.
+- Retain markdown text formatting if present (such as horizontal lines, header levels, footers, bullet points, links/urls, or other markdown elements).
+- Strictly do not omit any textual content from the markdown formatted extracted text.
 - Strictly do not include any additional explanations or comments in the markdown formatted extracted text.
 - Strictly do not generate code fences or backticks like ``` or ```markdown.
 
