@@ -41,6 +41,7 @@ dependencies = [
     "pymupdf>=1.22.0",
     "tenacity>=9.0.0",
     "tqdm>=4.65.0",
+    
 ]
 
 [project.urls]
@@ -63,9 +64,21 @@ gemini = [
 openai = [
     "openai==1.59.8",
 ]
+groq = [
+    "groq==0.30.0",
+]
+vertex = [
+    "google-cloud-aiplatform>=1.38.0",
+    "vertexai>=0.3.0",
+    "google-auth>=2.25.0",
+]
 all = [
     "google-generativeai==0.8.3",
     "openai==1.59.8",
+    "groq==0.30.0",
+    "google-cloud-aiplatform>=1.38.0",
+    "vertexai>=0.3.0",
+    "google-auth>=2.25.0",
 ]
 
 [tool.hatch.build.targets.wheel]

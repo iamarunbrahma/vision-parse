@@ -481,6 +481,147 @@ async def test_ollama_llm_error(mock_async_client, sample_base64_image, mock_pix
     mock_client = AsyncMock()
     mock_async_client.return_value = mock_client
 
+    # Mock the chat responses to raise an exception
+    mock_chat = AsyncMock()
+    mock_chat.side_effect = Exception("test error")
+    mock_client.chat = mock_chat
+
+    llm = LLM(
+        model_name="llama3.2-vision:11b",
+        temperature=0.7,
+        top_p=0.7,
+        api_key=None,
+        ollama_config={"OLLAMA_BASE_URL": "http://localhost:11434"},
+        image_mode="base64",
+        detailed_extraction=True,
+        enable_concurrency=True,
+        num_workers=1,
+    )
+
+    # Test that LLMError is raised
+    with pytest.raises(LLMError) as exc_info:
+        await llm.generate_markdown(mock_pixmap)
+    assert "Error processing image with Ollama" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+@patch("groq.AsyncGroq")
+async def test_groq_generate_markdown(
+    MockAsyncGroq, sample_base64_image, mock_pixmap,
+):
+    """Test markdown generation using Groq."""
+    # Mock the Groq async client
+    mock_client = AsyncMock()
+    MockAsyncGroq.return_value = mock_client
+
+    # Mock the chat completions responses
+    mock_completions = AsyncMock()
+    mock_client.chat.completions.create = mock_completions
+    mock_completions.return_value = MagicMock(
+        choices=[
+            MagicMock(
+                message=MagicMock(
+                    content=json.dumps(
+                        {
+                            "text_detected": "Yes",
+                            "tables_detected": "No",
+                            "images_detected": "No",
+                            "latex_equations_detected": "No",
+                            "extracted_text": "Test content from Groq",
+                            "confidence_score_text": 0.95,
+                        }
+                    )
+                )
+            )
+        ]
+    )
+
+    llm = LLM(
+        model_name="meta-llama/llama-4-scout-17b-16e-instruct",
+        temperature=0.7,
+        top_p=0.7,
+        api_key="test-key",
+        groq_config={
+            "GROQ_MAX_TOKENS": 4096,
+            "GROQ_TIMEOUT": 300.0,
+        },
+        image_mode="base64",
+        detailed_extraction=True,
+        enable_concurrency=True,
+        num_workers=1,
+    )
+
+    # Call the method we want to test
+    result = await llm.generate_markdown(mock_pixmap)
+
+    # Verify that the client was called with the correct parameters
+    assert mock_completions.call_count == 1
+    args, kwargs = mock_completions.call_args
+    assert kwargs["model"] == "meta-llama/llama-4-scout-17b-16e-instruct"
+    assert kwargs["temperature"] == 0.7
+    assert kwargs["top_p"] == 0.7
+    assert kwargs["max_tokens"] == 4096
+
+    # Check the content of the messages
+    messages = kwargs["messages"]
+    assert len(messages) == 1
+    assert messages[0]["role"] == "user"
+    assert isinstance(messages[0]["content"], list)
+    assert len(messages[0]["content"]) == 2
+    assert messages[0]["content"][0]["type"] == "text"
+    assert messages[0]["content"][1]["type"] == "image_url"
+    assert "data:image/jpeg;base64," in messages[0]["content"][1]["image_url"]["url"]
+
+    # Verify result contains expected data
+    assert "text_detected" in result
+    assert result["extracted_text"] == "Test content from Groq"
+    assert result["confidence_score_text"] == 0.95
+
+
+@pytest.mark.asyncio
+@patch("groq.AsyncGroq")
+async def test_groq_error_handling(
+    MockAsyncGroq, sample_base64_image, mock_pixmap,
+):
+    """Test error handling with Groq API."""
+    # Mock the Groq async client
+    mock_client = AsyncMock()
+    MockAsyncGroq.return_value = mock_client
+
+    # Mock the chat completions to raise an exception
+    mock_completions = AsyncMock()
+    mock_client.chat.completions.create = mock_completions
+    mock_completions.side_effect = Exception("Image too large - images can contain at most 33177600 pixels. but image contained 39289320")
+
+    llm = LLM(
+        model_name="meta-llama/llama-4-scout-17b-16e-instruct",
+        temperature=0.7,
+        top_p=0.7,
+        api_key="test-key",
+        groq_config={
+            "GROQ_MAX_TOKENS": 4096,
+            "GROQ_TIMEOUT": 300.0,
+        },
+        image_mode="base64",
+        detailed_extraction=True,
+        enable_concurrency=True,
+        num_workers=1,
+    )
+
+    # Test that the appropriate error is raised
+    with pytest.raises(LLMError) as exc_info:
+        await llm.generate_markdown(mock_pixmap)
+    
+    # Check that the error message includes our custom handling
+    error_msg = str(exc_info.value)
+    assert "Image exceeds Groq's size limit" in error_msg
+    assert "max 33,177,600 pixels" in error_msg
+    assert "lower DPI setting" in error_msg
+    """Test LLMError handling for Ollama."""
+    # Mock the Ollama async client
+    mock_client = AsyncMock()
+    mock_async_client.return_value = mock_client
+
     # Mock a failed Ollama API call
     mock_client.chat.side_effect = Exception("Ollama processing failed")
 
@@ -504,3 +645,103 @@ async def test_ollama_llm_error(mock_async_client, sample_base64_image, mock_pix
         await llm.generate_markdown(sample_base64_image, mock_pixmap, 0)
     assert "Ollama Model processing failed" in str(exc_info.value)
     assert mock_client.chat.call_count == 1
+
+
+@pytest.mark.asyncio
+@patch("vertexai.generative_models.GenerativeModel")
+@patch("vertexai.generative_models.Part.from_data")
+async def test_vertex_generate_markdown(
+    MockPart, MockGenerativeModel, sample_base64_image, mock_pixmap
+):
+    """Test markdown generation using Vertex AI."""
+    # Mock the Vertex AI GenerativeModel
+    mock_model = MagicMock()
+    MockGenerativeModel.return_value = mock_model
+    
+    # Mock the response
+    mock_response = MagicMock()
+    mock_response.text = """
+    ```markdown
+    # Test content from Vertex AI
+    This is sample markdown content generated by Vertex AI.
+    ```
+    """
+    mock_model.generate_content.return_value = mock_response
+    
+    # Mock the Part creation
+    mock_image_part = MagicMock()
+    MockPart.return_value = mock_image_part
+    
+    # Initialize the LLM
+    llm = LLM(
+        model_name="gemini-1.5-pro-002",
+        temperature=0.7,
+        top_p=0.7,
+        api_key="test-key",
+        vertex_config={"PROJECT_ID": "test-project"},
+        ollama_config=None,
+        openai_config=None,
+        gemini_config=None,
+        groq_config=None,
+        image_mode=None,
+        custom_prompt=None,
+        detailed_extraction=False,
+        enable_concurrency=False,
+        device=None,
+        num_workers=1,
+    )
+    
+    # Call the method we want to test
+    result = await llm.generate_markdown(sample_base64_image, mock_pixmap, 0)
+    
+    # Verify that the model was called with the correct parameters
+    assert mock_model.generate_content.call_count == 1
+    
+    # Check the content creation with Part
+    MockPart.assert_called_once()
+    
+    # Verify result contains expected data
+    assert "Test content from Vertex AI" in result
+    assert "This is sample markdown content generated by Vertex AI." in result
+
+
+@pytest.mark.asyncio
+@patch("vertexai.generative_models.GenerativeModel")
+@patch("vertexai.generative_models.Part.from_data")
+async def test_vertex_error_handling(
+    MockPart, MockGenerativeModel, sample_base64_image, mock_pixmap
+):
+    """Test error handling with Vertex AI API."""
+    # Mock the Vertex AI GenerativeModel
+    mock_model = MagicMock()
+    MockGenerativeModel.return_value = mock_model
+    
+    # Mock the generate_content method to raise an exception
+    mock_model.generate_content.side_effect = Exception("Image exceeds allowed dimensions. Maximum size is 20 megapixels.")
+    
+    # Initialize the LLM
+    llm = LLM(
+        model_name="gemini-1.5-pro-002",
+        temperature=0.7,
+        top_p=0.7,
+        api_key="test-key",
+        vertex_config={"PROJECT_ID": "test-project"},
+        ollama_config=None,
+        openai_config=None,
+        gemini_config=None,
+        groq_config=None,
+        image_mode=None,
+        custom_prompt=None,
+        detailed_extraction=False,
+        enable_concurrency=False,
+        device=None,
+        num_workers=1,
+    )
+    
+    # Test the error handling
+    with pytest.raises(LLMError) as exc_info:
+        await llm.generate_markdown(sample_base64_image, mock_pixmap, 0)
+    
+    # Verify error message contains expected text
+    assert "Image exceeds Vertex AI size limits" in str(exc_info.value)
+    assert "lower DPI setting" in str(exc_info.value)

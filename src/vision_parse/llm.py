@@ -47,6 +47,12 @@ class LLM:
         _md_prompt_template = Template(
             files("vision_parse").joinpath("markdown_prompt.j2").read_text()
         )
+        _image_summary_prompt = Template(
+            files("vision_parse").joinpath("image_summary_prompt.j2").read_text()
+        )
+        _page_visuals_prompt = Template(
+            files("vision_parse").joinpath("page_visuals_prompt.j2").read_text()
+        )
     except Exception as e:
         raise FileNotFoundError(f"Failed to load prompt files: {str(e)}")
 
@@ -59,12 +65,15 @@ class LLM:
         ollama_config: Union[Dict, None],
         openai_config: Union[Dict, None],
         gemini_config: Union[Dict, None],
+        groq_config: Union[Dict, None],
+        vertex_config: Union[Dict, None],
         image_mode: Literal["url", "base64", None],
         custom_prompt: Union[str, None],
         detailed_extraction: bool,
         enable_concurrency: bool,
         device: Literal["cuda", "mps", None],
         num_workers: int,
+        enable_image_summary: bool = True,
         **kwargs: Any,
     ):
         self.model_name = model_name
@@ -72,11 +81,14 @@ class LLM:
         self.ollama_config = ollama_config or {}
         self.openai_config = openai_config or {}
         self.gemini_config = gemini_config or {}
+        self.groq_config = groq_config or {}
+        self.vertex_config = vertex_config or {}
         self.temperature = temperature
         self.top_p = top_p
         self.image_mode = image_mode
         self.custom_prompt = custom_prompt
         self.detailed_extraction = detailed_extraction
+        self.enable_image_summary = enable_image_summary
         self.kwargs = kwargs
         self.enable_concurrency = enable_concurrency
         self.device = device
@@ -87,7 +99,63 @@ class LLM:
 
     def _init_llm(self) -> None:
         """Initialize the LLM client."""
-        if self.provider == "ollama":
+        if self.provider == "groq":
+            try:
+                import groq
+            except ImportError:
+                raise ImportError(
+                    "Groq is not installed. Please install it using pip install 'vision-parse[groq]' or pip install groq."
+                )
+            try:
+                if self.enable_concurrency:
+                    from groq import AsyncGroq
+
+                    self.aclient = AsyncGroq(
+                        api_key=self.api_key,
+                        timeout=self.groq_config.get("GROQ_TIMEOUT", 240.0),
+                        max_retries=self.groq_config.get("GROQ_MAX_RETRIES", 3),
+                        base_url=self.groq_config.get("GROQ_BASE_URL", None),
+                    )
+                else:
+                    self.client = groq.Groq(
+                        api_key=self.api_key,
+                        timeout=self.groq_config.get("GROQ_TIMEOUT", 240.0),
+                        max_retries=self.groq_config.get("GROQ_MAX_RETRIES", 3),
+                        base_url=self.groq_config.get("GROQ_BASE_URL", None),
+                    )
+            except Exception as e:
+                raise LLMError(f"Unable to initialize Groq client: {str(e)}")
+
+        elif self.provider == "vertex":
+            try:
+                import vertexai
+                from vertexai.generative_models import GenerationConfig
+                from google.oauth2 import credentials
+            except ImportError:
+                raise ImportError(
+                    "Vertex AI dependencies are not installed. Please install them using pip install 'vision-parse[vertex]' or pip install google-cloud-aiplatform vertexai."
+                )
+            
+            try:
+                # Initialize Vertex AI with provided credentials and project details
+                project_id = self.vertex_config.get("PROJECT_ID")
+                location = self.vertex_config.get("LOCATION", "us-central1")
+                
+                # Use API key as OAuth token for credentials
+                if self.api_key:  # If API key is provided, use it as OAuth token
+                    creds = credentials.Credentials(token=self.api_key)
+                    vertexai.init(project=project_id, location=location, credentials=creds)
+                else:
+                    # Use default credentials from environment
+                    vertexai.init(project=project_id, location=location)
+                
+                # Store GenerationConfig for later use
+                self.generation_config = GenerationConfig
+                
+            except Exception as e:
+                raise LLMError(f"Unable to initialize Vertex AI client: {str(e)}")
+                
+        elif self.provider == "ollama":
             import ollama
 
             try:
@@ -310,7 +378,68 @@ class LLM:
             return await self._openai(base64_encoded, prompt, structured)
         elif self.provider == "gemini":
             return await self._gemini(base64_encoded, prompt, structured)
+        elif self.provider == "groq":
+            return await self._groq(base64_encoded, prompt, structured)
+        elif self.provider == "vertex":
+            return await self._vertex(base64_encoded, prompt, structured)
 
+    async def generate_image_summary(
+        self, base64_encoded: str, page_context: str = None
+    ) -> str:
+        """Generate a summary description of an image using the appropriate LLM model.
+        
+        Args:
+            base64_encoded: Base64 encoded image data
+            page_context: Optional text context from the page containing the image
+            
+        Returns:
+            A concise summary of the image content
+        """
+        try:
+            # Generate the prompt with optional page context
+            prompt = self._image_summary_prompt.render(page_context=page_context)
+            
+            # Use existing response method to get summary from LLM
+            summary = await self._get_response(base64_encoded, prompt)
+            
+            # Clean up response - remove any markdown formatting that might have been added
+            summary = re.sub(r"```.*?```", "", summary, flags=re.DOTALL).strip()
+            
+            # Truncate if too long
+            if len(summary) > 200:
+                summary = summary[:197] + "..."
+                
+            return summary
+        
+        except Exception as e:
+            logger.warning(f"Failed to generate image summary: {str(e)}")
+            return "[Image summary unavailable]"
+            
+    async def detect_page_visuals(
+        self, base64_encoded: str, custom_prompt: str = None
+    ) -> str:
+        """Detect and summarize visual elements (images, diagrams, charts, etc.) on an entire page.
+        
+        Args:
+            base64_encoded: Base64 encoded image of the entire page
+            custom_prompt: Optional custom prompt to override default
+            
+        Returns:
+            A formatted summary of all visual elements detected on the page
+        """
+        try:
+            # Generate the prompt with optional custom instructions
+            prompt = self._page_visuals_prompt.render(custom_prompt=custom_prompt)
+            
+            # Use existing response method to get analysis from LLM
+            visuals_summary = await self._get_response(base64_encoded, prompt)
+            
+            return visuals_summary
+        
+        except Exception as e:
+            logger.warning(f"Failed to detect page visuals: {str(e)}")
+            return ""
+    
     async def generate_markdown(
         self, base64_encoded: str, pix: fitz.Pixmap, page_number: int
     ) -> Any:
@@ -341,13 +470,9 @@ class LLM:
                 ):
                     return json_response.extracted_text
 
-                if (
-                    json_response.images_detected.strip() == "Yes"
-                    and self.image_mode is not None
-                ):
-                    extracted_images = ImageData.extract_images(
-                        pix, self.image_mode, page_number
-                    )
+                # Skip individual image extraction since we're using whole page analysis now
+                # Only set an empty list to avoid errors in code that may expect this attribute
+                pix._extracted_images = []
 
                 prompt = self._md_prompt_template.render(
                     extracted_text=json_response.extracted_text,
@@ -376,19 +501,162 @@ class LLM:
             base64_encoded, prompt, structured=False
         )
 
-        if extracted_images:
-            if self.image_mode == "url":
-                for image_data in extracted_images:
-                    markdown_content += (
-                        f"\n\n![{image_data.image_url}]({image_data.image_url})"
-                    )
-            elif self.image_mode == "base64":
-                for image_data in extracted_images:
-                    markdown_content += (
-                        f"\n\n![{image_data.image_url}]({image_data.base64_encoded})"
-                    )
-
+        # Remove image embedding since we're using page-level visual analysis now
         return markdown_content
+
+    @retry(
+        reraise=True,
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=4, max=10),
+    )
+    async def _vertex(
+        self, base64_encoded: str, prompt: str, structured: bool = False
+    ) -> Any:
+        """Process base64-encoded image through Vertex AI vision models."""
+        try:
+            # Import required libraries within the method to avoid dependency issues
+            from vertexai.generative_models import GenerativeModel, Part
+            import asyncio
+            
+            # Create model instance
+            model = GenerativeModel(model_name=self.model_name)
+            
+            # Create content parts
+            content = []
+            
+            # Add prompt text
+            content.append(prompt)
+            
+            # Add image part
+            image_part = Part.from_data(mimetype="image/jpeg", data=base64.b64decode(base64_encoded))
+            content.append(image_part)
+            
+            # Set generation parameters
+            if structured:
+                # For structured data extraction, use more conservative parameters
+                temperature = 0.0
+                top_p = 0.4
+            else:
+                temperature = self.temperature
+                top_p = self.top_p
+            
+            # Handle both sync and async operations
+            if self.enable_concurrency:
+                # In async mode, use coroutines directly
+                response = await asyncio.to_thread(
+                    model.generate_content,
+                    content,
+                    generation_config=self.generation_config(
+                        temperature=temperature,
+                        top_p=top_p,
+                        **self.kwargs
+                    ),
+                )
+            else:
+                # In sync mode
+                response = model.generate_content(
+                    content,
+                    generation_config=self.generation_config(
+                        temperature=temperature,
+                        top_p=top_p,
+                        **self.kwargs
+                    ),
+                )
+            
+            # Extract and clean response text
+            return re.sub(
+                r"```(?:markdown)?\n(.*?)\n```", r"\1", response.text, flags=re.DOTALL
+            )
+            
+        except Exception as e:
+            error_msg = str(e)
+            if "exceeds the maximum content length" in error_msg.lower():
+                # Handle context length errors
+                raise LLMError(
+                    f"Image too complex for Vertex AI model context window: {error_msg}"
+                )
+            elif "image size" in error_msg.lower() or "exceeds allowed dimensions" in error_msg.lower():
+                # Handle image size errors
+                raise LLMError(
+                    f"Image exceeds Vertex AI size limits. Please use a lower DPI setting in page_config: {error_msg}"
+                )
+            else:
+                raise LLMError(f"Error processing image with Vertex AI: {error_msg}")
+                
+    @retry(
+        reraise=True,
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=4, max=10),
+    )
+    async def _groq(
+        self, base64_encoded: str, prompt: str, structured: bool = False
+    ) -> Any:
+        """Process base64-encoded image through Groq vision models."""
+        try:
+            # Basic content with text prompt
+            content = [{"type": "text", "text": prompt}]
+            
+            # Handle image based on image_mode
+            if self.image_mode == "url":
+                # If image_mode is URL, we need to have created a URL for the image
+                # This assumes extracted_images logic has created a URL
+                logger.info("Using URL mode for Groq API is not currently supported in direct page processing")
+                # Fall back to base64 mode
+                image_content = {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:image/jpeg;base64,{base64_encoded}",
+                    },
+                }
+            else:  # base64 or None (default to base64)
+                # Use base64 data URL format
+                image_content = {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:image/jpeg;base64,{base64_encoded}",
+                    },
+                }
+            
+            # Add image to content
+            content.append(image_content)
+
+            if self.enable_concurrency:
+                response = await self.aclient.chat.completions.create(
+                    model=self.model_name,
+                    messages=[{"role": "user", "content": content}],
+                    temperature=self.temperature,
+                    top_p=self.top_p,
+                    max_tokens=self.groq_config.get("GROQ_MAX_TOKENS", 4096),
+                    response_format={"type": "json_object"} if structured else None,
+                )
+            else:
+                response = self.client.chat.completions.create(
+                    model=self.model_name,
+                    messages=[{"role": "user", "content": content}],
+                    temperature=self.temperature,
+                    top_p=self.top_p,
+                    max_tokens=self.groq_config.get("GROQ_MAX_TOKENS", 4096),
+                    response_format={"type": "json_object"} if structured else None,
+                )
+
+            return response.choices[0].message.content
+
+        except Exception as e:
+            error_msg = str(e)
+            if "maximum context length" in error_msg.lower():
+                # Handle context length errors
+                raise LLMError(
+                    f"Image too complex for Groq model context window: {error_msg}"
+                )
+            elif (
+                "image too large" in error_msg.lower() or "pixels" in error_msg.lower()
+            ):
+                # Handle image size errors
+                raise LLMError(
+                    f"Image exceeds Groq's size limit (max 33,177,600 pixels). Please use a lower DPI setting in page_config: {error_msg}"
+                )
+            else:
+                raise LLMError(f"Error processing image with Groq API: {error_msg}")
 
     @retry(
         reraise=True,

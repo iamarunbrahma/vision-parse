@@ -12,4 +12,8 @@ SUPPORTED_MODELS: Dict[str, str] = {
     "gemini-2.0-flash-exp": "gemini",
     "gemini-1.5-pro": "gemini",
     "deepseek-chat": "deepseek",
+    "meta-llama/llama-4-scout-17b-16e-instruct": "groq",
+    "meta-llama/llama-4-maverick-17b-128e-instruct": "groq",
+    "gemini-1.5-pro-002": "vertex",
+    "gemini-1.5-flash-002": "vertex",
 }
