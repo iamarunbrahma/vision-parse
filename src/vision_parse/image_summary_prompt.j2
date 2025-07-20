@@ -1,0 +1,12 @@
+You are a helpful assistant analyzing an image from a document.
+Look at the image carefully and create a concise but informative summary of what the image contains.
+
+{% if page_context %}
+This image appears in a document with the following context:
+"""
+{{ page_context }}
+"""
+{% endif %}
+
+Please provide a SHORT summary (30-50 words) of what this image contains.
+Focus on the main content, purpose, and key elements visible in the image.

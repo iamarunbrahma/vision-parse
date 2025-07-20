@@ -20,6 +20,7 @@ class ImageExtractionError(BaseException):
 class ImageData:
     image_url: str  # URL path for extracted images
     base64_encoded: str | None  # Base64 string if image_mode is base64, None otherwise
+    summary: str | None = None  # Summary description of the image
     _lock: ClassVar[Lock] = Lock()  # Lock for thread safety
 
     @staticmethod
@@ -108,35 +109,45 @@ class ImageData:
 
                     if cls._check_region_validity(region, contour, (w, h)):
                         # Encode image based on mode
+                        # Always encode as base64 for LLM processing regardless of image_mode
+                        image_url = f"image_{page_number+1}_{idx}.png"
+                        img_bytes = cv2.imencode(".png", region)[1].tobytes()
+                        if not img_bytes:
+                            continue
+                            
+                        # Create base64 encoding for the image
+                        base64_str = base64.b64encode(img_bytes).decode('utf-8', errors='ignore')
+                        
                         if image_mode == "url":
-                            image_url = f"image_{page_number+1}_{idx}.png"
-
+                            # Save image to file system
                             if not cv2.imwrite(image_url, region):
                                 continue
-
-                            idx += 1
-
+                                
+                            # Store only URL reference, not base64 data
                             extracted_images.append(
                                 ImageData(
                                     image_url=image_url,
-                                    base64_encoded=None,
+                                    base64_encoded=None,  # Don't store in final output
+                                    # We'll add summary later
                                 )
                             )
-                        else:  # base64 mode
-                            image_url = f"image_{page_number+1}_{idx}.png"
-
-                            img_bytes = cv2.imencode(".png", region)[1].tobytes()
-                            if not img_bytes:
-                                continue
-                            base64_encoded = f"data:image/png;base64,{base64.b64encode(img_bytes).decode('utf-8', errors='ignore')}"
-                            idx += 1
-
+                        else:  # base64 mode or None
+                            # For base64 mode, store the base64 data
+                            base64_encoded = f"data:image/png;base64,{base64_str}"
+                            
                             extracted_images.append(
                                 ImageData(
                                     image_url=image_url,
                                     base64_encoded=base64_encoded,
+                                    # We'll add summary later
                                 )
                             )
+                            
+                        # Store the raw base64 string for summary generation
+                        # (will be used outside this function)
+                        extracted_images[-1]._raw_base64 = base64_str
+                        
+                        idx += 1
 
                 return extracted_images
             except Exception as e:

@@ -1,0 +1,31 @@
+You are analyzing a document page. Look for and identify any visual elements in this page such as:
+- Images
+- Diagrams
+- Charts/Graphs
+- Flowcharts
+- Technical drawings
+- Visualizations
+- Tables (only describe complex tables, simple ones can be directly transcribed)
+
+For each visual element you identify:
+1. Describe what it depicts or represents in 2-3 sentences
+2. Explain its significance in the context of the document
+3. Note any key data points, trends, or relationships shown
+
+Format your response like this:
+
+{% if custom_prompt %}
+{{ custom_prompt }}
+{% else %}
+## Visual Elements Summary
+
+### [Type of Visual Element 1]
+[Description and significance]
+
+### [Type of Visual Element 2]
+[Description and significance]
+
+... and so on for any additional visuals.
+
+If no visual elements are found, simply respond with: "No visual elements detected on this page."
+{% endif %}

@@ -50,11 +50,13 @@ class VisionParser:
         openai_config: Optional[Dict] = None,
         gemini_config: Optional[Dict] = None,
         groq_config: Optional[Dict] = None,
+        vertex_config: Optional[Dict] = None,
         image_mode: Literal["url", "base64", None] = None,
         custom_prompt: Optional[str] = None,
         detailed_extraction: bool = False,
         extraction_complexity: bool = False,  # Deprecated Parameter
         enable_concurrency: bool = False,
+        enable_image_summary: bool = True,
         **kwargs: Any,
     ):
         """Initialize parser with PDFPageConfig and LLM configuration."""
@@ -84,12 +86,14 @@ class VisionParser:
             openai_config=openai_config,
             gemini_config=gemini_config,
             groq_config=groq_config,
+            vertex_config=vertex_config,
             image_mode=image_mode,
             detailed_extraction=detailed_extraction,
             custom_prompt=custom_prompt,
             enable_concurrency=enable_concurrency,
             device=self.device,
             num_workers=self.num_workers,
+            enable_image_summary=enable_image_summary,
             **kwargs,
         )
 
@@ -107,6 +111,7 @@ class VisionParser:
 
     async def _convert_page(self, page: fitz.Page, page_number: int) -> str:
         """Convert a single PDF page into base64-encoded PNG and extract markdown formatted text."""
+        pix = None
         try:
             matrix = self._calculate_matrix(page)
 
@@ -120,7 +125,45 @@ class VisionParser:
 
             # Convert image to base64 for LLM processing
             base64_encoded = base64.b64encode(pix.tobytes("png")).decode("utf-8")
-            return await self.llm.generate_markdown(base64_encoded, pix, page_number)
+            
+            # First, generate the basic markdown content from the page
+            markdown = await self.llm.generate_markdown(base64_encoded, pix, page_number)
+            
+            # If detailed extraction and image summary are enabled, detect and summarize visual elements on the page
+            if (hasattr(self.llm, 'detailed_extraction') and self.llm.detailed_extraction and 
+                hasattr(self.llm, 'enable_image_summary') and self.llm.enable_image_summary):
+                # Custom prompt that includes information about the page content
+                custom_prompt = f"""Analyze this document page and identify any visual elements like images, diagrams, charts, 
+                flowcharts, or visualizations. For each visual element, provide a brief description of what it shows 
+                and its significance. Note that the page contains the following text content for context:
+                
+                {markdown[:300]}{'...' if len(markdown) > 300 else ''}
+                
+                Only describe visual elements that are not already properly captured in the text transcription above.
+                If no significant visual elements are present, respond with an empty string."""
+                
+                # Get visual elements summary
+                visuals_summary = await self.llm.detect_page_visuals(base64_encoded, custom_prompt)
+                
+                # Only append if there's actual visual content detected
+                if visuals_summary and "No visual elements detected" not in visuals_summary:
+                    # Add visual elements summary to the markdown
+                    markdown += f"\n\n{visuals_summary}"
+                    
+                    # If image mode is set to include the actual images
+                    if self.llm.image_mode in ["base64", "url"]:
+                        # Add the full page image at the end if there are visual elements
+                        if self.llm.image_mode == "base64":
+                            # Use base64 encoding for the image
+                            img_reference = f"\n\n![Page {page_number + 1}](data:image/png;base64,{base64_encoded})\n\n"
+                            markdown += img_reference
+                        elif self.llm.image_mode == "url":
+                            # Save the image to a file and use the URL
+                            img_path = f"page_{page_number + 1}.png"
+                            pix.save(img_path)
+                            markdown += f"\n\n![Page {page_number + 1}]({img_path})\n\n"
+            
+            return markdown
 
         except Exception as e:
             raise VisionParserError(
