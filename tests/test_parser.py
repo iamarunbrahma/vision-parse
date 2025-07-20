@@ -234,3 +234,22 @@ def test_parser_with_ollama_config():
         ollama_config=ollama_config,
     )
     assert parser.llm.ollama_config == ollama_config
+
+
+def test_parser_with_groq_config():
+    """Test parser initialization with Groq configuration."""
+    groq_config = {
+        "GROQ_MAX_TOKENS": 4096,
+        "GROQ_TIMEOUT": 300.0,
+    }
+    parser = VisionParser(
+        page_config=PDFPageConfig(dpi=200),  # Lower DPI for Groq's pixel limit
+        model_name="meta-llama/llama-4-scout-17b-16e-instruct",
+        temperature=0.7,
+        top_p=0.7,
+        api_key="test-key",
+        groq_config=groq_config,
+        enable_concurrency=True,
+    )
+    assert parser.llm.groq_config == groq_config
+    assert parser.llm.provider == "groq"
