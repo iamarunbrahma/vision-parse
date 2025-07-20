@@ -59,6 +59,7 @@ class LLM:
         ollama_config: Union[Dict, None],
         openai_config: Union[Dict, None],
         gemini_config: Union[Dict, None],
+        groq_config: Union[Dict, None],
         image_mode: Literal["url", "base64", None],
         custom_prompt: Union[str, None],
         detailed_extraction: bool,
@@ -72,6 +73,7 @@ class LLM:
         self.ollama_config = ollama_config or {}
         self.openai_config = openai_config or {}
         self.gemini_config = gemini_config or {}
+        self.groq_config = groq_config or {}
         self.temperature = temperature
         self.top_p = top_p
         self.image_mode = image_mode
@@ -87,7 +89,34 @@ class LLM:
 
     def _init_llm(self) -> None:
         """Initialize the LLM client."""
-        if self.provider == "ollama":
+        if self.provider == "groq":
+            try:
+                import groq
+            except ImportError:
+                raise ImportError(
+                    "Groq is not installed. Please install it using pip install 'vision-parse[groq]' or pip install groq."
+                )
+            try:
+                if self.enable_concurrency:
+                    from groq import AsyncGroq
+
+                    self.aclient = AsyncGroq(
+                        api_key=self.api_key,
+                        timeout=self.groq_config.get("GROQ_TIMEOUT", 240.0),
+                        max_retries=self.groq_config.get("GROQ_MAX_RETRIES", 3),
+                        base_url=self.groq_config.get("GROQ_BASE_URL", None),
+                    )
+                else:
+                    self.client = groq.Groq(
+                        api_key=self.api_key,
+                        timeout=self.groq_config.get("GROQ_TIMEOUT", 240.0),
+                        max_retries=self.groq_config.get("GROQ_MAX_RETRIES", 3),
+                        base_url=self.groq_config.get("GROQ_BASE_URL", None),
+                    )
+            except Exception as e:
+                raise LLMError(f"Unable to initialize Groq client: {str(e)}")
+
+        elif self.provider == "ollama":
             import ollama
 
             try:
@@ -310,6 +339,8 @@ class LLM:
             return await self._openai(base64_encoded, prompt, structured)
         elif self.provider == "gemini":
             return await self._gemini(base64_encoded, prompt, structured)
+        elif self.provider == "groq":
+            return await self._groq(base64_encoded, prompt, structured)
 
     async def generate_markdown(
         self, base64_encoded: str, pix: fitz.Pixmap, page_number: int
@@ -389,6 +420,64 @@ class LLM:
                     )
 
         return markdown_content
+
+    @retry(
+        reraise=True,
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=4, max=10),
+    )
+    async def _groq(
+        self, base64_encoded: str, prompt: str, structured: bool = False
+    ) -> Any:
+        """Process base64-encoded image through Groq vision models."""
+        try:
+            content = [
+                {"type": "text", "text": prompt},
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:image/jpeg;base64,{base64_encoded}",
+                    },
+                },
+            ]
+
+            if self.enable_concurrency:
+                response = await self.aclient.chat.completions.create(
+                    model=self.model_name,
+                    messages=[{"role": "user", "content": content}],
+                    temperature=self.temperature,
+                    top_p=self.top_p,
+                    max_tokens=self.groq_config.get("GROQ_MAX_TOKENS", 4096),
+                    response_format={"type": "json_object"} if structured else None,
+                )
+            else:
+                response = self.client.chat.completions.create(
+                    model=self.model_name,
+                    messages=[{"role": "user", "content": content}],
+                    temperature=self.temperature,
+                    top_p=self.top_p,
+                    max_tokens=self.groq_config.get("GROQ_MAX_TOKENS", 4096),
+                    response_format={"type": "json_object"} if structured else None,
+                )
+
+            return response.choices[0].message.content
+
+        except Exception as e:
+            error_msg = str(e)
+            if "maximum context length" in error_msg.lower():
+                # Handle context length errors
+                raise LLMError(
+                    f"Image too complex for Groq model context window: {error_msg}"
+                )
+            elif (
+                "image too large" in error_msg.lower() or "pixels" in error_msg.lower()
+            ):
+                # Handle image size errors
+                raise LLMError(
+                    f"Image exceeds Groq's size limit (max 33,177,600 pixels). Please use a lower DPI setting in page_config: {error_msg}"
+                )
+            else:
+                raise LLMError(f"Error processing image with Groq API: {error_msg}")
 
     @retry(
         reraise=True,

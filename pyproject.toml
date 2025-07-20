@@ -41,6 +41,7 @@ dependencies = [
     "pymupdf>=1.22.0",
     "tenacity>=9.0.0",
     "tqdm>=4.65.0",
+    
 ]
 
 [project.urls]
@@ -62,6 +63,9 @@ gemini = [
 ]
 openai = [
     "openai==1.59.8",
+]
+groq = [
+    "groq==0.30.0",
 ]
 all = [
     "google-generativeai==0.8.3",
