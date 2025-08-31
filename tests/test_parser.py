@@ -27,13 +27,13 @@ def test_convert_pdf_invalid_file(markdown_parser, tmp_path):
     assert "File is not a PDF" in str(exc_info.value)
 
 
-def test_calculate_matrix(markdown_parser, pdf_document):
-    """Test the matrix calculation for PDF page transformation."""
-    page = pdf_document[0]
-    matrix = markdown_parser._calculate_matrix(page)
+def test_calculate_scale_and_rotation(markdown_parser, pdf_document):
+    """Test the scale and rotation calculation for PDF page transformation."""
+    page = pdf_document.get_page(0)
+    scale, rotation = markdown_parser._calculate_scale_and_rotation(page)
     expected_zoom = markdown_parser.page_config.dpi / 72 * 2
-    assert matrix.a == expected_zoom
-    assert matrix.d == expected_zoom
+    assert scale == expected_zoom
+    assert isinstance(rotation, int)
 
 
 def test_convert_pdf_integration(markdown_parser, pdf_path):
@@ -103,18 +103,17 @@ async def test_parser_with_base64_image_mode(mock_tqdm, mock_async_client, pdf_p
     )
 
     # Mock the PDF document
-    with patch("fitz.open") as mock_open:
+    with patch("pypdfium2.PdfDocument") as mock_open:
         mock_doc = MagicMock()
         mock_page = MagicMock()
-        mock_pixmap = MagicMock()
-        mock_pixmap.samples = b"\x00" * (200 * 200 * 3)  # Create correct size buffer
-        mock_pixmap.height = 200
-        mock_pixmap.width = 200
-        mock_pixmap.n = 3
-        mock_pixmap.tobytes = MagicMock(return_value=b"test_image_data")
-        mock_page.get_pixmap.return_value = mock_pixmap
-        mock_doc.page_count = 1
-        mock_doc.__getitem__.return_value = mock_page
+        mock_bitmap = MagicMock()
+        mock_bitmap.to_numpy.return_value = b"\x00" * (200 * 200 * 3)  # Create correct size buffer
+        mock_bitmap.to_pil.return_value = MagicMock()
+        mock_bitmap.close = MagicMock()
+        mock_page.render.return_value = mock_bitmap
+        mock_page.get_rotation.return_value = 0
+        mock_doc.__len__.return_value = 1
+        mock_doc.get_page.return_value = mock_page
         mock_open.return_value.__enter__.return_value = mock_doc
 
         # Mock tqdm
@@ -172,18 +171,17 @@ async def test_parser_with_concurrent_processing(
     )
 
     # Mock the PDF document
-    with patch("fitz.open") as mock_open:
+    with patch("pypdfium2.PdfDocument") as mock_open:
         mock_doc = MagicMock()
         mock_page = MagicMock()
-        mock_pixmap = MagicMock()
-        mock_pixmap.samples = b"\x00" * (200 * 200 * 3)  # Create correct size buffer
-        mock_pixmap.height = 200
-        mock_pixmap.width = 200
-        mock_pixmap.n = 3
-        mock_pixmap.tobytes = MagicMock(return_value=b"test_image_data")
-        mock_page.get_pixmap.return_value = mock_pixmap
-        mock_doc.page_count = 2
-        mock_doc.__getitem__.return_value = mock_page
+        mock_bitmap = MagicMock()
+        mock_bitmap.to_numpy.return_value = b"\x00" * (200 * 200 * 3)  # Create correct size buffer
+        mock_bitmap.to_pil.return_value = MagicMock()
+        mock_bitmap.close = MagicMock()
+        mock_page.render.return_value = mock_bitmap
+        mock_page.get_rotation.return_value = 0
+        mock_doc.__len__.return_value = 2
+        mock_doc.get_page.return_value = mock_page
         mock_open.return_value.__enter__.return_value = mock_doc
 
         # Mock tqdm

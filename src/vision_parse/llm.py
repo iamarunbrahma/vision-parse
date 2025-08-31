@@ -2,7 +2,7 @@ from typing import Literal, Dict, Any, Union
 from pydantic import BaseModel
 from jinja2 import Template
 import re
-import fitz
+import pypdfium2 as pdfium
 import os
 from tqdm import tqdm
 from .utils import ImageData
@@ -312,7 +312,7 @@ class LLM:
             return await self._gemini(base64_encoded, prompt, structured)
 
     async def generate_markdown(
-        self, base64_encoded: str, pix: fitz.Pixmap, page_number: int
+        self, base64_encoded: str, bitmap: pdfium.PdfBitmap, page_number: int
     ) -> Any:
         """Generate markdown formatted text from a base64-encoded image using appropriate model provider."""
         extracted_images = []
@@ -346,7 +346,7 @@ class LLM:
                     and self.image_mode is not None
                 ):
                     extracted_images = ImageData.extract_images(
-                        pix, self.image_mode, page_number
+                        bitmap, self.image_mode, page_number
                     )
 
                 prompt = self._md_prompt_template.render(

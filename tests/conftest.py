@@ -1,6 +1,6 @@
 import pytest
 from pathlib import Path
-import fitz  # PyMuPDF library for PDF handling
+import pypdfium2 as pdfium  # pypdfium2 library for PDF handling
 from vision_parse.parser import PDFPageConfig, VisionParser
 
 
@@ -35,6 +35,5 @@ def markdown_parser(page_config):
 # Fixture handling PDF document lifecycle with proper cleanup
 @pytest.fixture
 def pdf_document(pdf_path):
-    doc = fitz.open(pdf_path)
-    yield doc
-    doc.close()
+    with pdfium.PdfDocument(pdf_path) as doc:
+        yield doc

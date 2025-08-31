@@ -1,4 +1,4 @@
-import fitz
+import pypdfium2 as pdfium
 import numpy as np
 import cv2
 import base64
@@ -66,7 +66,7 @@ class ImageData:
     @classmethod
     def extract_images(
         cls,
-        pix: fitz.Pixmap,
+        bitmap: pdfium.PdfBitmap,
         image_mode: Literal["url", "base64", None],
         page_number: int,
         min_dimensions: tuple = (100, 100),
@@ -75,12 +75,16 @@ class ImageData:
         with cls._lock:
             try:
                 min_width, min_height = min_dimensions
-                page_array = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
-                    pix.height, pix.width, pix.n
-                )
-                page_image = cv2.cvtColor(
-                    page_array, cv2.COLOR_RGBA2BGR if pix.n == 4 else cv2.COLOR_RGB2BGR
-                )
+                # Convert pypdfium2 bitmap to numpy array
+                page_array = bitmap.to_numpy()
+                
+                # pypdfium2 uses BGR by default, but we need to handle different formats
+                if page_array.shape[2] == 4:  # BGRA format
+                    page_image = cv2.cvtColor(page_array, cv2.COLOR_BGRA2BGR)
+                elif page_array.shape[2] == 3:  # BGR format (default for pypdfium2)
+                    page_image = page_array
+                else:
+                    raise ImageExtractionError(f"Unsupported image format with {page_array.shape[2]} channels")
                 processed_image = cls._prepare_image_for_detection(page_image)
 
                 contours, _ = cv2.findContours(

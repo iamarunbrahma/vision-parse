@@ -38,7 +38,7 @@ dependencies = [
     "ollama>=0.4.4",
     "opencv-python>=4.10.0.84",
     "pydantic>=2.0.0",
-    "pymupdf>=1.22.0",
+    "pypdfium2>=4.0.0",
     "tenacity>=9.0.0",
     "tqdm>=4.65.0",
 ]
