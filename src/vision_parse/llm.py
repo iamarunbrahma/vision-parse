@@ -90,12 +90,20 @@ class LLM:
         if self.provider == "ollama":
             import ollama
 
+            host = self.ollama_config.get("OLLAMA_HOST", "http://localhost:11434")
+            timeout = self.ollama_config.get("OLLAMA_REQUEST_TIMEOUT", 240.0)
+            
+            self.client = ollama.Client(host=host, timeout=timeout)
+            
+            if self.enable_concurrency:
+                self.aclient = ollama.AsyncClient(host=host, timeout=timeout)
+
             try:
-                ollama.show(self.model_name)
+                self.client.show(self.model_name)
             except ollama.ResponseError as e:
                 if e.status_code == 404:
                     current_digest, bars = "", {}
-                    for progress in ollama.pull(self.model_name, stream=True):
+                    for progress in self.client.pull(self.model_name, stream=True):
                         digest = progress.get("digest", "")
                         if digest != current_digest and current_digest in bars:
                             bars[current_digest].close()
@@ -126,12 +134,6 @@ class LLM:
                     self.ollama_config.get("OLLAMA_KEEP_ALIVE", -1)
                 )
                 if self.enable_concurrency:
-                    self.aclient = ollama.AsyncClient(
-                        host=self.ollama_config.get(
-                            "OLLAMA_HOST", "http://localhost:11434"
-                        ),
-                        timeout=self.ollama_config.get("OLLAMA_REQUEST_TIMEOUT", 240.0),
-                    )
                     if self.device == "cuda":
                         os.environ["OLLAMA_NUM_GPU"] = str(
                             self.ollama_config.get(
@@ -171,13 +173,6 @@ class LLM:
                                 "OLLAMA_NUM_PARALLEL", self.num_workers * 10
                             )
                         )
-                else:
-                    self.client = ollama.Client(
-                        host=self.ollama_config.get(
-                            "OLLAMA_HOST", "http://localhost:11434"
-                        ),
-                        timeout=self.ollama_config.get("OLLAMA_REQUEST_TIMEOUT", 240.0),
-                    )
             except Exception as e:
                 raise LLMError(f"Unable to initialize Ollama client: {str(e)}")
 
