@@ -4,6 +4,7 @@ from jinja2 import Template
 import re
 import pypdfium2 as pdfium
 import os
+import base64
 from tqdm import tqdm
 from .utils import ImageData
 from tenacity import retry, stop_after_attempt, wait_exponential
@@ -93,10 +94,10 @@ class LLM:
             host = self.ollama_config.get("OLLAMA_HOST", "http://localhost:11434")
             timeout = self.ollama_config.get("OLLAMA_REQUEST_TIMEOUT", 240.0)
             
-            self.client = ollama.Client(host=host, timeout=timeout)
+            self.client = ollama.Client(host=host, timeout=timeout, trust_env=False)
             
             if self.enable_concurrency:
-                self.aclient = ollama.AsyncClient(host=host, timeout=timeout)
+                self.aclient = ollama.AsyncClient(host=host, timeout=timeout, trust_env=False)
 
             try:
                 self.client.show(self.model_name)
@@ -176,7 +177,7 @@ class LLM:
             except Exception as e:
                 raise LLMError(f"Unable to initialize Ollama client: {str(e)}")
 
-        elif self.provider == "openai" or self.provider == "deepseek":
+        elif self.provider == "openai":
             #  support azure openai
             if self.provider == "openai" and self.openai_config.get(
                 "AZURE_OPENAI_API_KEY"
@@ -242,7 +243,7 @@ class LLM:
                             base_url=(
                                 self.openai_config.get("OPENAI_BASE_URL", None)
                                 if self.provider == "openai"
-                                else "https://api.deepseek.com"
+                                else "https://api.openai.com"
                             ),
                             max_retries=self.openai_config.get("OPENAI_MAX_RETRIES", 3),
                             timeout=self.openai_config.get("OPENAI_TIMEOUT", 240.0),
@@ -256,7 +257,7 @@ class LLM:
                             base_url=(
                                 self.openai_config.get("OPENAI_BASE_URL", None)
                                 if self.provider == "openai"
-                                else "https://api.deepseek.com"
+                                else "https://api.openai.com"
                             ),
                             max_retries=self.openai_config.get("OPENAI_MAX_RETRIES", 3),
                             timeout=self.openai_config.get("OPENAI_TIMEOUT", 240.0),
@@ -269,16 +270,16 @@ class LLM:
 
         elif self.provider == "gemini":
             try:
-                import google.generativeai as genai
+                from google import genai
+                from google.genai import types, errors
             except ImportError:
                 raise ImportError(
                     "Gemini is not installed. Please install it using pip install 'vision-parse[gemini]'."
                 )
 
             try:
-                genai.configure(api_key=self.api_key)
-                self.client = genai.GenerativeModel(model_name=self.model_name)
-                self.generation_config = genai.GenerationConfig
+                self.client = genai.Client(api_key=self.api_key)
+                self.model_name = self.model_name
             except Exception as e:
                 raise LLMError(f"Unable to initialize Gemini client: {str(e)}")
 
@@ -301,7 +302,7 @@ class LLM:
     ):
         if self.provider == "ollama":
             return await self._ollama(base64_encoded, prompt, structured)
-        elif self.provider == "openai" or self.provider == "deepseek":
+        elif self.provider == "openai":
             return await self._openai(base64_encoded, prompt, structured)
         elif self.provider == "gemini":
             return await self._gemini(base64_encoded, prompt, structured)
@@ -468,7 +469,7 @@ class LLM:
 
             if self.enable_concurrency:
                 if structured:
-                    if os.getenv("AZURE_OPENAI_API_KEY") or self.provider == "deepseek":
+                    if os.getenv("AZURE_OPENAI_API_KEY"):
                         response = await self.aclient.chat.completions.create(
                             model=self.model_name,
                             messages=messages,
@@ -499,7 +500,7 @@ class LLM:
                 )
             else:
                 if structured:
-                    if os.getenv("AZURE_OPENAI_API_KEY") or self.provider == "deepseek":
+                    if os.getenv("AZURE_OPENAI_API_KEY"):
                         response = self.client.chat.completions.create(
                             model=self.model_name,
                             messages=messages,
@@ -548,31 +549,49 @@ class LLM:
     ) -> Any:
         """Process base64-encoded image through Gemini vision models."""
         try:
+            image_bytes = base64.b64decode(base64_encoded)
+            
             if self.enable_concurrency:
-                response = await self.client.generate_content_async(
-                    [{"mime_type": "image/png", "data": base64_encoded}, prompt],
-                    generation_config=self.generation_config(
+                response = await self.client.aio.models.generate_content(
+                    model=self.model_name,
+                    contents=[
+                        types.Part.from_bytes(
+                            data=image_bytes,
+                            mime_type="image/png"
+                        ),
+                        prompt
+                    ],
+                    config=types.GenerateContentConfig(
                         response_mime_type="application/json" if structured else None,
                         response_schema=ImageDescription if structured else None,
                         temperature=0.0 if structured else self.temperature,
                         top_p=0.4 if structured else self.top_p,
-                        **self.kwargs,
-                    ),
+                        **self.kwargs
+                    )
                 )
             else:
-                response = self.client.generate_content(
-                    [{"mime_type": "image/png", "data": base64_encoded}, prompt],
-                    generation_config=self.generation_config(
+                response = self.client.models.generate_content(
+                    model=self.model_name,
+                    contents=[
+                        types.Part.from_bytes(
+                            data=image_bytes,
+                            mime_type="image/png"
+                        ),
+                        prompt
+                    ],
+                    config=types.GenerateContentConfig(
                         response_mime_type="application/json" if structured else None,
                         response_schema=ImageDescription if structured else None,
                         temperature=0.0 if structured else self.temperature,
                         top_p=0.4 if structured else self.top_p,
-                        **self.kwargs,
-                    ),
+                        **self.kwargs
+                    )
                 )
 
             return re.sub(
                 r"```(?:markdown)?\n(.*?)\n```", r"\1", response.text, flags=re.DOTALL
             )
+        except errors.APIError as e:
+            raise LLMError(f"Gemini API error: {str(e)}")
         except Exception as e:
             raise LLMError(f"Gemini Model processing failed: {str(e)}")

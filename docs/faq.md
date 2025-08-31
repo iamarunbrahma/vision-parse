@@ -8,7 +8,7 @@
 
     This is a known limitation with locally hosted Ollama models. Here are some solutions:
 
-    - **Use API-based Models**: For better performance, consider using API-based models like OpenAI, DeepSeek, or Gemini, which are significantly faster and more accurate.
+    - **Use API-based Models**: For better performance, consider using API-based models like OpenAI or Gemini, which are significantly faster and more accurate.
     - **Enable Concurrency**: Set `enable_concurrency` to `True` so that multiple pages are processed in parallel, thereby reducing latency. You can also increase the value of `OLLAMA_NUM_PARALLEL` to maximize the number of pages that can be processed in parallel.
     - **Disable Detailed Extraction**: Disable the `detailed_extraction` parameter for simpler PDF documents, which can improve latency.
 

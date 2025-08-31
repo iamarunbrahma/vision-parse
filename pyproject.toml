@@ -58,13 +58,13 @@ dev = [
     "twine>=6.0.1",
 ]
 gemini = [
-    "google-generativeai==0.8.3",
+    "google-genai>=0.2.0",
 ]
 openai = [
     "openai==1.59.8",
 ]
 all = [
-    "google-generativeai==0.8.3",
+    "google-genai>=0.2.0",
     "openai==1.59.8",
 ]
 

@@ -348,65 +348,6 @@ async def test_gemini_generate_markdown(
     assert mock_client.generate_content_async.call_count == 2
 
 
-@pytest.mark.asyncio
-@patch("openai.AsyncOpenAI")
-async def test_deepseek_generate_markdown(
-    MockAsyncOpenAI, sample_base64_image, mock_pixmap
-):
-    """Test markdown generation using Deepseek."""
-    mock_client = AsyncMock()
-    MockAsyncOpenAI.return_value = mock_client
-
-    # Mock structured analysis response
-    mock_parse = AsyncMock()
-    mock_parse.choices = [
-        AsyncMock(
-            message=AsyncMock(
-                content=json.dumps(
-                    {
-                        "text_detected": "Yes",
-                        "tables_detected": "No",
-                        "images_detected": "No",
-                        "latex_equations_detected": "No",
-                        "extracted_text": "Test content",
-                        "confidence_score_text": 0.9,
-                    }
-                )
-            )
-        )
-    ]
-
-    # Mock markdown conversion response
-    mock_create = AsyncMock()
-    mock_create.choices = [
-        AsyncMock(message=AsyncMock(content="# Test Header\n\nTest content"))
-    ]
-    # Set up side effects to return mock_parse first, then mock_create
-    mock_client.chat.completions.create = AsyncMock(
-        side_effect=[mock_parse, mock_create]
-    )
-
-    llm = LLM(
-        model_name="deepseek-chat",
-        api_key="test-key",
-        temperature=0.7,
-        top_p=0.7,
-        ollama_config=None,
-        openai_config=None,
-        gemini_config=None,
-        image_mode=None,
-        custom_prompt=None,
-        detailed_extraction=True,
-        enable_concurrency=True,
-        device=None,
-        num_workers=1,
-    )
-    result = await llm.generate_markdown(sample_base64_image, mock_pixmap, 0)
-
-    assert isinstance(result, str)
-    assert "Test content" in result
-    assert mock_client.chat.completions.create.call_count == 2
-
 
 @pytest.mark.asyncio
 @patch("ollama.AsyncClient")
