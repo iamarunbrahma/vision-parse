@@ -2,29 +2,27 @@ import pypdfium2 as pdfium
 import numpy as np
 import cv2
 import base64
-from typing import List, Tuple, Literal, ClassVar
+from typing import List, Tuple, Literal, ClassVar, Optional
 from dataclasses import dataclass
 from threading import Lock
 import logging
 
-logger = logging.getLogger(__name__)
+_logger = logging.getLogger(__name__)
 
 
-class ImageExtractionError(BaseException):
-    """Custom exception for handling Image Extraction errors."""
-
+class ImageExtractionError(Exception):
     pass
 
 
 @dataclass
 class ImageData:
-    image_url: str  # URL path for extracted images
-    base64_encoded: str | None  # Base64 string if image_mode is base64, None otherwise
-    _lock: ClassVar[Lock] = Lock()  # Lock for thread safety
+    image_url: str
+    base64_encoded: Optional[str] = None
+    
+    _lock: ClassVar[Lock] = Lock()
 
     @staticmethod
     def _prepare_image_for_detection(image: np.ndarray) -> np.ndarray:
-        """Process image to highlight potential image regions."""
         try:
             grayscale = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
             smooth = cv2.GaussianBlur(grayscale, (5, 5), 0)
@@ -42,9 +40,8 @@ class ImageData:
 
     @staticmethod
     def _check_region_validity(
-        region: np.ndarray, contour: np.ndarray, region_dims: tuple
+        region: np.ndarray, contour: np.ndarray, region_dims: Tuple[int, int]
     ) -> bool:
-        """Determine if region contains a valid image based on statistical properties."""
         try:
             width, height = region_dims
             region_area = cv2.contourArea(contour) / (width * height)
@@ -59,9 +56,7 @@ class ImageData:
                 and region_variance < 500
             )
         except Exception as e:
-            raise ImageExtractionError(
-                f"Image validity check for region failed: {str(e)}"
-            )
+            raise ImageExtractionError(f"Region validity check failed: {str(e)}")
 
     @classmethod
     def extract_images(
@@ -69,9 +64,8 @@ class ImageData:
         bitmap: pdfium.PdfBitmap,
         image_mode: Literal["url", "base64", None],
         page_number: int,
-        min_dimensions: tuple = (100, 100),
+        min_dimensions: Tuple[int, int] = (100, 100),
     ) -> List["ImageData"]:
-        """Extract images with their coordinates and hash versions based on image_mode."""
         with cls._lock:
             try:
                 min_width, min_height = min_dimensions
@@ -148,7 +142,6 @@ class ImageData:
 
 
 def get_device_config() -> Tuple[Literal["cuda", "mps", "cpu"], int]:
-    """Get optimal number of worker processes based on device."""
     import platform
     import subprocess
     import os
@@ -167,4 +160,4 @@ def get_device_config() -> Tuple[Literal["cuda", "mps", "cpu"], int]:
 
     if platform.system() == "Darwin" and platform.processor() == "arm":
         return "mps", 4
-    return "cpu", max(2, (os.cpu_count() // 2))
+    return "cpu", max(2, (os.cpu_count() or 1) // 2)

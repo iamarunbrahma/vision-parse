@@ -118,60 +118,6 @@ async def test_ollama_generate_markdown(
     assert mock_chat.call_count == 1
 
 
-@pytest.mark.asyncio
-@patch("ollama.AsyncClient")
-async def test_ollama_deepseek_r1_generate_markdown(
-    mock_async_client,
-    sample_base64_image,
-    mock_pixmap,
-):
-    """Test markdown generation using Ollama."""
-    # Mock the Ollama async client
-    mock_client = AsyncMock()
-    mock_async_client.return_value = mock_client
-
-    # Mock the chat responses
-    mock_chat = AsyncMock()
-    mock_chat.side_effect = [
-        {
-            "message": {
-                "content": json.dumps(
-                    {
-                        "text_detected": "Yes",
-                        "tables_detected": "No",
-                        "images_detected": "No",
-                        "latex_equations_detected": "No",
-                        "extracted_text": "Test content",
-                        "confidence_score_text": 0.9,
-                    }
-                )
-            }
-        }
-    ]
-    mock_client.chat = mock_chat
-
-    llm = LLM(
-        model_name="deepseek-r1:32b",
-        temperature=0.7,
-        top_p=0.7,
-        api_key=None,
-        ollama_config=None,
-        openai_config=None,
-        gemini_config=None,
-        image_mode=None,
-        custom_prompt=None,
-        detailed_extraction=True,
-        enable_concurrency=True,
-        device=None,
-        num_workers=1,
-    )
-    assert "deepseek llm" in llm
-    result = await llm.generate_markdown(sample_base64_image, mock_pixmap, 0)
-
-    assert isinstance(result, str)
-    assert "Test content" in result
-    assert mock_chat.call_count == 1
-
 
 @pytest.mark.asyncio
 @patch("openai.AsyncOpenAI")

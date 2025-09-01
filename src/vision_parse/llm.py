@@ -1,4 +1,4 @@
-from typing import Literal, Dict, Any, Union
+from typing import Literal, Dict, Any, Union, Optional
 from pydantic import BaseModel
 from jinja2 import Template
 import re
@@ -8,15 +8,13 @@ import base64
 from tqdm import tqdm
 from .utils import ImageData
 from tenacity import retry, stop_after_attempt, wait_exponential
-from .constants import SUPPORTED_MODELS
+from .constants import SUPPORTED_MODELS, discover_ollama_vision_models
 import logging
 
-logger = logging.getLogger(__name__)
+_logger = logging.getLogger(__name__)
 
 
 class ImageDescription(BaseModel):
-    """Model Schema for image description."""
-
     text_detected: Literal["Yes", "No"]
     tables_detected: Literal["Yes", "No"]
     images_detected: Literal["Yes", "No"]
@@ -25,27 +23,22 @@ class ImageDescription(BaseModel):
     confidence_score_text: float
 
 
-class UnsupportedModelError(BaseException):
-    """Custom exception for unsupported model names"""
-
+class UnsupportedModelError(Exception):
     pass
 
 
-class LLMError(BaseException):
-    """Custom exception for Vision LLM errors"""
-
+class LLMError(Exception):
     pass
 
 
 class LLM:
-    # Load prompts at class level
     try:
         from importlib.resources import files
 
-        _image_analysis_prompt = Template(
+        _IMAGE_ANALYSIS_PROMPT = Template(
             files("vision_parse").joinpath("image_analysis.j2").read_text()
         )
-        _md_prompt_template = Template(
+        _MD_PROMPT_TEMPLATE = Template(
             files("vision_parse").joinpath("markdown_prompt.j2").read_text()
         )
     except Exception as e:
@@ -288,9 +281,14 @@ class LLM:
         try:
             return SUPPORTED_MODELS[model_name]
         except KeyError:
+            dynamic_models = discover_ollama_vision_models()
+            if model_name in dynamic_models:
+                return dynamic_models[model_name]
+            
+            all_models = {**SUPPORTED_MODELS, **dynamic_models}
             supported_models = ", ".join(
                 f"'{model}' from {provider}"
-                for model, provider in SUPPORTED_MODELS.items()
+                for model, provider in all_models.items()
             )
             raise UnsupportedModelError(
                 f"Model '{model_name}' is not supported. "

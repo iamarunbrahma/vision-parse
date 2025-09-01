@@ -219,7 +219,6 @@ def test_parser_with_custom_page_config():
 
 
 def test_parser_with_ollama_config():
-    """Test parser initialization with Ollama configuration."""
     ollama_config = {
         "OLLAMA_HOST": "http://localhost:11434",
         "OLLAMA_NUM_GPU": "1",
@@ -232,3 +231,15 @@ def test_parser_with_ollama_config():
         ollama_config=ollama_config,
     )
     assert parser.llm.ollama_config == ollama_config
+
+
+def test_parser_custom_num_workers():
+    custom_num_workers = 10
+    parser = VisionParser(
+        model_name="llama3.2-vision:11b",
+        temperature=0.7,
+        top_p=0.7,
+        num_workers=custom_num_workers,
+    )
+    assert parser.num_workers == custom_num_workers
+    assert parser.llm.num_workers == custom_num_workers

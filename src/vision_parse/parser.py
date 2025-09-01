@@ -53,13 +53,15 @@ class VisionParser:
         image_mode: Literal["url", "base64", None] = None,
         custom_prompt: Optional[str] = None,
         detailed_extraction: bool = False,
-        extraction_complexity: bool = False,  # Deprecated Parameter
+        extraction_complexity: bool = False,
         enable_concurrency: bool = False,
+        num_workers: Optional[int] = None,
         **kwargs: Any,
     ):
         """Initialize parser with PDFPageConfig and LLM configuration."""
         self.page_config = page_config or PDFPageConfig()
-        self.device, self.num_workers = get_device_config()
+        self.device, auto_num_workers = get_device_config()
+        self.num_workers = num_workers if num_workers is not None else auto_num_workers
         self.enable_concurrency = enable_concurrency
 
         if extraction_complexity:
