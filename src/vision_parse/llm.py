@@ -2,20 +2,19 @@ from typing import Literal, Dict, Any, Union
 from pydantic import BaseModel
 from jinja2 import Template
 import re
-import fitz
+import pypdfium2 as pdfium
 import os
+import base64
 from tqdm import tqdm
 from .utils import ImageData
 from tenacity import retry, stop_after_attempt, wait_exponential
-from .constants import SUPPORTED_MODELS
+from .constants import SUPPORTED_MODELS, discover_ollama_vision_models
 import logging
 
-logger = logging.getLogger(__name__)
+_logger = logging.getLogger(__name__)
 
 
 class ImageDescription(BaseModel):
-    """Model Schema for image description."""
-
     text_detected: Literal["Yes", "No"]
     tables_detected: Literal["Yes", "No"]
     images_detected: Literal["Yes", "No"]
@@ -24,31 +23,35 @@ class ImageDescription(BaseModel):
     confidence_score_text: float
 
 
-class UnsupportedModelError(BaseException):
-    """Custom exception for unsupported model names"""
-
+class UnsupportedModelError(Exception):
     pass
 
 
-class LLMError(BaseException):
-    """Custom exception for Vision LLM errors"""
-
+class LLMError(Exception):
     pass
 
 
 class LLM:
-    # Load prompts at class level
     try:
         from importlib.resources import files
 
-        _image_analysis_prompt = Template(
+        _IMAGE_ANALYSIS_PROMPT = Template(
             files("vision_parse").joinpath("image_analysis.j2").read_text()
         )
-        _md_prompt_template = Template(
+        _MD_PROMPT_TEMPLATE = Template(
             files("vision_parse").joinpath("markdown_prompt.j2").read_text()
         )
     except Exception as e:
         raise FileNotFoundError(f"Failed to load prompt files: {str(e)}")
+
+    # Accessors for class-level Jinja2 templates to keep instance usage consistent
+    @property
+    def _image_analysis_prompt(self) -> Template:
+        return self._IMAGE_ANALYSIS_PROMPT
+
+    @property
+    def _md_prompt_template(self) -> Template:
+        return self._MD_PROMPT_TEMPLATE
 
     def __init__(
         self,
@@ -90,18 +93,28 @@ class LLM:
         if self.provider == "ollama":
             import ollama
 
+            host = self.ollama_config.get("OLLAMA_HOST", "http://localhost:11434")
+            timeout = self.ollama_config.get("OLLAMA_REQUEST_TIMEOUT", 240.0)
+
+            self.client = ollama.Client(host=host, timeout=timeout, trust_env=False)
+
+            if self.enable_concurrency:
+                self.aclient = ollama.AsyncClient(
+                    host=host, timeout=timeout, trust_env=False
+                )
+
             try:
-                ollama.show(self.model_name)
+                self.client.show(self.model_name)
             except ollama.ResponseError as e:
                 if e.status_code == 404:
                     current_digest, bars = "", {}
-                    for progress in ollama.pull(self.model_name, stream=True):
+                    for progress in self.client.pull(self.model_name, stream=True):
                         digest = progress.get("digest", "")
                         if digest != current_digest and current_digest in bars:
                             bars[current_digest].close()
 
                         if not digest:
-                            logger.info(progress.get("status"))
+                            _logger.info(progress.get("status"))
                             continue
 
                         if digest not in bars and (total := progress.get("total")):
@@ -126,12 +139,6 @@ class LLM:
                     self.ollama_config.get("OLLAMA_KEEP_ALIVE", -1)
                 )
                 if self.enable_concurrency:
-                    self.aclient = ollama.AsyncClient(
-                        host=self.ollama_config.get(
-                            "OLLAMA_HOST", "http://localhost:11434"
-                        ),
-                        timeout=self.ollama_config.get("OLLAMA_REQUEST_TIMEOUT", 240.0),
-                    )
                     if self.device == "cuda":
                         os.environ["OLLAMA_NUM_GPU"] = str(
                             self.ollama_config.get(
@@ -171,17 +178,10 @@ class LLM:
                                 "OLLAMA_NUM_PARALLEL", self.num_workers * 10
                             )
                         )
-                else:
-                    self.client = ollama.Client(
-                        host=self.ollama_config.get(
-                            "OLLAMA_HOST", "http://localhost:11434"
-                        ),
-                        timeout=self.ollama_config.get("OLLAMA_REQUEST_TIMEOUT", 240.0),
-                    )
             except Exception as e:
                 raise LLMError(f"Unable to initialize Ollama client: {str(e)}")
 
-        elif self.provider == "openai" or self.provider == "deepseek":
+        elif self.provider == "openai":
             #  support azure openai
             if self.provider == "openai" and self.openai_config.get(
                 "AZURE_OPENAI_API_KEY"
@@ -247,7 +247,7 @@ class LLM:
                             base_url=(
                                 self.openai_config.get("OPENAI_BASE_URL", None)
                                 if self.provider == "openai"
-                                else "https://api.deepseek.com"
+                                else "https://api.openai.com"
                             ),
                             max_retries=self.openai_config.get("OPENAI_MAX_RETRIES", 3),
                             timeout=self.openai_config.get("OPENAI_TIMEOUT", 240.0),
@@ -261,7 +261,7 @@ class LLM:
                             base_url=(
                                 self.openai_config.get("OPENAI_BASE_URL", None)
                                 if self.provider == "openai"
-                                else "https://api.deepseek.com"
+                                else "https://api.openai.com"
                             ),
                             max_retries=self.openai_config.get("OPENAI_MAX_RETRIES", 3),
                             timeout=self.openai_config.get("OPENAI_TIMEOUT", 240.0),
@@ -274,16 +274,16 @@ class LLM:
 
         elif self.provider == "gemini":
             try:
-                import google.generativeai as genai
+                from google import genai
             except ImportError:
                 raise ImportError(
                     "Gemini is not installed. Please install it using pip install 'vision-parse[gemini]'."
                 )
 
             try:
-                genai.configure(api_key=self.api_key)
-                self.client = genai.GenerativeModel(model_name=self.model_name)
-                self.generation_config = genai.GenerationConfig
+                self._genai = genai
+                self.client = self._genai.Client(api_key=self.api_key)
+                self.model_name = self.model_name
             except Exception as e:
                 raise LLMError(f"Unable to initialize Gemini client: {str(e)}")
 
@@ -292,9 +292,13 @@ class LLM:
         try:
             return SUPPORTED_MODELS[model_name]
         except KeyError:
+            dynamic_models = discover_ollama_vision_models()
+            if model_name in dynamic_models:
+                return dynamic_models[model_name]
+
+            all_models = {**SUPPORTED_MODELS, **dynamic_models}
             supported_models = ", ".join(
-                f"'{model}' from {provider}"
-                for model, provider in SUPPORTED_MODELS.items()
+                f"'{model}' from {provider}" for model, provider in all_models.items()
             )
             raise UnsupportedModelError(
                 f"Model '{model_name}' is not supported. "
@@ -306,13 +310,13 @@ class LLM:
     ):
         if self.provider == "ollama":
             return await self._ollama(base64_encoded, prompt, structured)
-        elif self.provider == "openai" or self.provider == "deepseek":
+        elif self.provider == "openai":
             return await self._openai(base64_encoded, prompt, structured)
         elif self.provider == "gemini":
             return await self._gemini(base64_encoded, prompt, structured)
 
     async def generate_markdown(
-        self, base64_encoded: str, pix: fitz.Pixmap, page_number: int
+        self, base64_encoded: str, bitmap: pdfium.PdfBitmap, page_number: int
     ) -> Any:
         """Generate markdown formatted text from a base64-encoded image using appropriate model provider."""
         extracted_images = []
@@ -346,7 +350,7 @@ class LLM:
                     and self.image_mode is not None
                 ):
                     extracted_images = ImageData.extract_images(
-                        pix, self.image_mode, page_number
+                        bitmap, self.image_mode, page_number
                     )
 
                 prompt = self._md_prompt_template.render(
@@ -358,7 +362,7 @@ class LLM:
                 )
 
             except Exception:
-                logger.warning(
+                _logger.warning(
                     "Detailed extraction failed. Falling back to simple extraction."
                 )
                 self.detailed_extraction = False
@@ -473,7 +477,7 @@ class LLM:
 
             if self.enable_concurrency:
                 if structured:
-                    if os.getenv("AZURE_OPENAI_API_KEY") or self.provider == "deepseek":
+                    if os.getenv("AZURE_OPENAI_API_KEY"):
                         response = await self.aclient.chat.completions.create(
                             model=self.model_name,
                             messages=messages,
@@ -504,7 +508,7 @@ class LLM:
                 )
             else:
                 if structured:
-                    if os.getenv("AZURE_OPENAI_API_KEY") or self.provider == "deepseek":
+                    if os.getenv("AZURE_OPENAI_API_KEY"):
                         response = self.client.chat.completions.create(
                             model=self.model_name,
                             messages=messages,
@@ -553,10 +557,18 @@ class LLM:
     ) -> Any:
         """Process base64-encoded image through Gemini vision models."""
         try:
+            image_bytes = base64.b64decode(base64_encoded)
+
             if self.enable_concurrency:
-                response = await self.client.generate_content_async(
-                    [{"mime_type": "image/png", "data": base64_encoded}, prompt],
-                    generation_config=self.generation_config(
+                response = await self.client.aio.models.generate_content(
+                    model=self.model_name,
+                    contents=[
+                        self._genai.types.Part.from_bytes(
+                            data=image_bytes, mime_type="image/png"
+                        ),
+                        prompt,
+                    ],
+                    config=self._genai.types.GenerateContentConfig(
                         response_mime_type="application/json" if structured else None,
                         response_schema=ImageDescription if structured else None,
                         temperature=0.0 if structured else self.temperature,
@@ -565,9 +577,15 @@ class LLM:
                     ),
                 )
             else:
-                response = self.client.generate_content(
-                    [{"mime_type": "image/png", "data": base64_encoded}, prompt],
-                    generation_config=self.generation_config(
+                response = self.client.models.generate_content(
+                    model=self.model_name,
+                    contents=[
+                        self._genai.types.Part.from_bytes(
+                            data=image_bytes, mime_type="image/png"
+                        ),
+                        prompt,
+                    ],
+                    config=self._genai.types.GenerateContentConfig(
                         response_mime_type="application/json" if structured else None,
                         response_schema=ImageDescription if structured else None,
                         temperature=0.0 if structured else self.temperature,
@@ -579,5 +597,7 @@ class LLM:
             return re.sub(
                 r"```(?:markdown)?\n(.*?)\n```", r"\1", response.text, flags=re.DOTALL
             )
+        except self._genai.errors.APIError as e:
+            raise LLMError(f"Gemini API error: {str(e)}")
         except Exception as e:
             raise LLMError(f"Gemini Model processing failed: {str(e)}")

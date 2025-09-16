@@ -121,7 +121,7 @@ markdown_pages = parser.convert_pdf(pdf_path)
 > [!TIP]
 > Please refer to [FAQs](docs/faq.md) for more details on how to improve the performance of locally hosted vision models.
 
-### API Models Usage (OpenAI, Azure OpenAI, Gemini, DeepSeek)
+### API Models Usage (OpenAI, Azure OpenAI, Gemini)
 
 ```python
 from vision_parse import VisionParser
@@ -155,7 +155,7 @@ parser = VisionParser(
 
 # Initialize parser with Google Gemini model
 parser = VisionParser(
-    model_name="gemini-1.5-flash",
+    model_name="gemini-2.5-flash",
     api_key="your-gemini-api-key", # Get the Gemini API key from https://aistudio.google.com/app/apikey
     temperature=0.7,
     top_p=0.4,
@@ -164,16 +164,6 @@ parser = VisionParser(
     enable_concurrency=True,
 )
 
-# Initialize parser with DeepSeek model
-parser = VisionParser(
-    model_name="deepseek-chat",
-    api_key="your-deepseek-api-key", # Get the DeepSeek API key from https://platform.deepseek.com/api_keys
-    temperature=0.7,
-    top_p=0.4,
-    image_mode="url",
-    detailed_extraction=False, # Set to True for more detailed extraction
-    enable_concurrency=True,
-)
 ```
 
 ## ✅ Supported Models
@@ -184,15 +174,14 @@ This package supports the following Vision LLM models:
 |:------------:|:----------:|
 | gpt-4o | OpenAI |
 | gpt-4o-mini | OpenAI |
-| gemini-1.5-flash | Google |
-| gemini-2.0-flash-exp | Google |
-| gemini-1.5-pro | Google |
+| gemini-2.5-pro | Google |
+| gemini-2.5-flash | Google |
+| gemini-2.0-flash | Google |
 | llava:13b | Ollama |
 | llava:34b | Ollama |
 | llama3.2-vision:11b | Ollama |
 | llama3.2-vision:70b | Ollama |
 | deepseek-r1:32b | Ollama |
-| deepseek-chat | DeepSeek |
 
 ## 🔧 Customization Parameters
 
@@ -203,7 +192,7 @@ Vision Parse offers several customization parameters to enhance document process
 | model_name | Name of the Vision LLM model to use | str |
 | custom_prompt | Define custom prompt for the model and it will be used as a suffix to the default prompt | str |
 | ollama_config | Specify custom configuration for Ollama client initialization | dict |
-| openai_config | Specify custom configuration for OpenAI, Azure OpenAI or DeepSeek client initialization | dict |
+| openai_config | Specify custom configuration for OpenAI or Azure OpenAI client initialization | dict |
 | gemini_config | Specify custom configuration for Gemini client initialization | dict |
 | image_mode | Sets the image output format for the model i.e. if you want image url in markdown content or base64 encoded image | str |
 | detailed_extraction | Enable advanced content extraction to extract complex information such as LaTeX equations, tables, images, etc. | bool |

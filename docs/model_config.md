@@ -16,7 +16,7 @@ Pass the following configuration settings to `ollama_config` parameter while ini
 
 For model-specific parameters (like temperature, top_p, etc.), please refer to the [Ollama Model Parameters documentation](https://github.com/ollama/ollama/blob/main/docs/modelfile.md#valid-parameters-and-values). You can pass model-specific parameters as additional kwargs to the `VisionParser` class.
 
-### OpenAI and DeepSeek Clients:
+### OpenAI Client:
 
 Pass the following configuration settings to `openai_config` parameter while initializing the VisionParser class.
 

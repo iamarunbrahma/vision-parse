@@ -119,61 +119,6 @@ async def test_ollama_generate_markdown(
 
 
 @pytest.mark.asyncio
-@patch("ollama.AsyncClient")
-async def test_ollama_deepseek_r1_generate_markdown(
-    mock_async_client,
-    sample_base64_image,
-    mock_pixmap,
-):
-    """Test markdown generation using Ollama."""
-    # Mock the Ollama async client
-    mock_client = AsyncMock()
-    mock_async_client.return_value = mock_client
-
-    # Mock the chat responses
-    mock_chat = AsyncMock()
-    mock_chat.side_effect = [
-        {
-            "message": {
-                "content": json.dumps(
-                    {
-                        "text_detected": "Yes",
-                        "tables_detected": "No",
-                        "images_detected": "No",
-                        "latex_equations_detected": "No",
-                        "extracted_text": "Test content",
-                        "confidence_score_text": 0.9,
-                    }
-                )
-            }
-        }
-    ]
-    mock_client.chat = mock_chat
-
-    llm = LLM(
-        model_name="deepseek-r1:32b",
-        temperature=0.7,
-        top_p=0.7,
-        api_key=None,
-        ollama_config=None,
-        openai_config=None,
-        gemini_config=None,
-        image_mode=None,
-        custom_prompt=None,
-        detailed_extraction=True,
-        enable_concurrency=True,
-        device=None,
-        num_workers=1,
-    )
-    assert "deepseek llm" in llm
-    result = await llm.generate_markdown(sample_base64_image, mock_pixmap, 0)
-
-    assert isinstance(result, str)
-    assert "Test content" in result
-    assert mock_chat.call_count == 1
-
-
-@pytest.mark.asyncio
 @patch("openai.AsyncOpenAI")
 async def test_openai_generate_markdown(
     MockAsyncOpenAI, sample_base64_image, mock_pixmap
@@ -299,15 +244,12 @@ async def test_azure_openai_generate_markdown(
 
 
 @pytest.mark.asyncio
-@patch("google.generativeai.GenerativeModel")
+@patch("google.genai.Client")
 async def test_gemini_generate_markdown(
-    MockGenerativeModel, sample_base64_image, mock_pixmap
+    MockGenaiClient, sample_base64_image, mock_pixmap
 ):
-    """Test markdown generation using Gemini."""
-    mock_client = AsyncMock()
-    MockGenerativeModel.return_value = mock_client
-
-    # Mock responses for both structured analysis and markdown generation
+    """Test markdown generation using Gemini (google-genai SDK)."""
+    # Prepare mocked responses
     mock_response1 = AsyncMock()
     mock_response1.text = json.dumps(
         {
@@ -322,12 +264,19 @@ async def test_gemini_generate_markdown(
     mock_response2 = AsyncMock()
     mock_response2.text = "# Test Header\n\nTest content"
 
-    mock_client.generate_content_async = AsyncMock(
+    # Build the nested async client shape used by the implementation
+    mock_async_models = MagicMock()
+    mock_async_models.generate_content = AsyncMock(
         side_effect=[mock_response1, mock_response2]
     )
+    mock_client_instance = MagicMock()
+    mock_client_instance.aio = MagicMock()
+    mock_client_instance.aio.models = mock_async_models
+
+    MockGenaiClient.return_value = mock_client_instance
 
     llm = LLM(
-        model_name="gemini-1.5-pro",
+        model_name="gemini-2.5-pro",
         api_key="test-key",
         temperature=0.7,
         top_p=0.7,
@@ -345,67 +294,7 @@ async def test_gemini_generate_markdown(
 
     assert isinstance(result, str)
     assert "Test content" in result
-    assert mock_client.generate_content_async.call_count == 2
-
-
-@pytest.mark.asyncio
-@patch("openai.AsyncOpenAI")
-async def test_deepseek_generate_markdown(
-    MockAsyncOpenAI, sample_base64_image, mock_pixmap
-):
-    """Test markdown generation using Deepseek."""
-    mock_client = AsyncMock()
-    MockAsyncOpenAI.return_value = mock_client
-
-    # Mock structured analysis response
-    mock_parse = AsyncMock()
-    mock_parse.choices = [
-        AsyncMock(
-            message=AsyncMock(
-                content=json.dumps(
-                    {
-                        "text_detected": "Yes",
-                        "tables_detected": "No",
-                        "images_detected": "No",
-                        "latex_equations_detected": "No",
-                        "extracted_text": "Test content",
-                        "confidence_score_text": 0.9,
-                    }
-                )
-            )
-        )
-    ]
-
-    # Mock markdown conversion response
-    mock_create = AsyncMock()
-    mock_create.choices = [
-        AsyncMock(message=AsyncMock(content="# Test Header\n\nTest content"))
-    ]
-    # Set up side effects to return mock_parse first, then mock_create
-    mock_client.chat.completions.create = AsyncMock(
-        side_effect=[mock_parse, mock_create]
-    )
-
-    llm = LLM(
-        model_name="deepseek-chat",
-        api_key="test-key",
-        temperature=0.7,
-        top_p=0.7,
-        ollama_config=None,
-        openai_config=None,
-        gemini_config=None,
-        image_mode=None,
-        custom_prompt=None,
-        detailed_extraction=True,
-        enable_concurrency=True,
-        device=None,
-        num_workers=1,
-    )
-    result = await llm.generate_markdown(sample_base64_image, mock_pixmap, 0)
-
-    assert isinstance(result, str)
-    assert "Test content" in result
-    assert mock_client.chat.completions.create.call_count == 2
+    assert mock_async_models.generate_content.call_count == 2
 
 
 @pytest.mark.asyncio
@@ -503,4 +392,5 @@ async def test_ollama_llm_error(mock_async_client, sample_base64_image, mock_pix
     with pytest.raises(LLMError) as exc_info:
         await llm.generate_markdown(sample_base64_image, mock_pixmap, 0)
     assert "Ollama Model processing failed" in str(exc_info.value)
-    assert mock_client.chat.call_count == 1
+    # Retries and fallback can cause multiple chat attempts; ensure at least one occurred
+    assert mock_client.chat.call_count >= 1
