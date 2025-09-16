@@ -59,14 +59,20 @@ dev = [
     "twine>=6.0.1",
 ]
 gemini = [
-    "google-genai>=0.2.0",
+    "google-genai==1.37.0",
 ]
 openai = [
     "openai==1.59.8",
 ]
+fast = [
+    "pdfminer.six",
+    "pdfplumber",
+]
 all = [
-    "google-genai>=0.2.0",
+    "google-genai==1.37.0",
     "openai==1.59.8",
+    "pdfminer.six",
+    "pdfplumber",
 ]
 
 [tool.hatch.build.targets.wheel]

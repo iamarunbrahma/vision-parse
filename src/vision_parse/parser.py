@@ -170,9 +170,8 @@ class VisionParser:
         # Fast path: use fast extractor and return per-page results
         if self.fast_mode:
             extractor = FastMarkdown(pdf_path)
-            combined, pages = extractor.extract()
-            # Return list of per-page markdowns
-            return pages if pages else ([] if combined == "" else [combined])
+            converted_pages = extractor.extract()
+            return converted_pages
 
         pdf_document = None
         try:

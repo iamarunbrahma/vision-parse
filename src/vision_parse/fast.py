@@ -102,8 +102,16 @@ class ListState:
     active: bool = False
     kind: str = "none"  # 'none' | 'ordered' | 'unordered'
     indent_level: int = 0
-    prev_line_left: Optional[float] = None
-    last_item_text: Optional[str] = None
+    
+
+
+@dataclass
+class PageFeatures:
+    """Container for pre-extracted page features from pdfplumber."""
+
+    tables: List[Dict[str, Any]]
+    hyperlinks: List[Dict[str, Any]]
+    horizontal_lines: List[Tuple[float, float, float, float]]
 
 
 class FontSizeAnalyzer:
@@ -138,14 +146,14 @@ class FastMarkdown:
     Responsibilities:
       - Iterate PDF pages with layout analysis
       - Infer basic structure: headers, paragraphs, lists
-      - Build per-page and combined markdown
+      - Build per-page markdown only (no combined output)
     """
 
     def __init__(self, pdf_path: Path) -> None:
         self.pdf_path = pdf_path
-        self.font_analyzer = FontSizeAnalyzer()
+        self._font_analyzer = FontSizeAnalyzer()
 
-    def extract(self) -> Tuple[str, List[str]]:
+    def extract(self) -> List[str]:
         try:
             pages_md: List[str] = []
             params = LAParams(
@@ -160,84 +168,95 @@ class FastMarkdown:
             layouts = list(extract_pages(self.pdf_path, laparams=params))
             _logger.info("Loaded %d pages from %s", len(layouts), self.pdf_path.name)
 
-            # Pre-extract tables per page using pdfplumber
-            tables_by_page: Dict[int, List[Dict[str, Any]]] = {}
-            hyperlinks_by_page: Dict[int, List[Dict[str, Any]]] = {}
-            lines_by_page: Dict[int, List[Tuple[float, float, float, float]]] = {}
-            with pdfplumber.open(str(self.pdf_path)) as pl:
-                for p_idx, page in enumerate(pl.pages):
-                    found = page.find_tables()
-                    page_tables: List[Dict[str, Any]] = []
-                    for t in found:
-                        try:
-                            content = t.extract()
-                            bbox = t.bbox  # (x0, top, x1, bottom) top-origin
-                            if content:
-                                page_tables.append({
-                                    "bbox": bbox,
-                                    "content": content,
-                                })
-                        except Exception:
-                            continue
-                    tables_by_page[p_idx] = page_tables
-                    # Collect hyperlinks
-                    page_links: List[Dict[str, Any]] = []
-                    for link in getattr(page, "hyperlinks", []) or []:
-                        try:
-                            uri = link.get("uri") or link.get("url")
-                            x0 = float(link.get("x0"))
-                            x1 = float(link.get("x1"))
-                            top = float(link.get("top"))
-                            bottom = float(link.get("bottom"))
-                            if uri:
-                                page_links.append({
-                                    "bbox": (x0, top, x1, bottom),
-                                    "uri": uri,
-                                })
-                        except Exception:
-                            continue
-                    hyperlinks_by_page[p_idx] = page_links
-                    # Collect page lines for strikethrough detection
-                    page_line_bboxes: List[Tuple[float, float, float, float]] = []
-                    for ln in getattr(page, "lines", []) or []:
-                        try:
-                            x0 = float(ln.get("x0"))
-                            x1 = float(ln.get("x1"))
-                            top = float(ln.get("top"))
-                            bottom = float(ln.get("bottom"))
-                            page_line_bboxes.append((x0, top, x1, bottom))
-                        except Exception:
-                            continue
-                    lines_by_page[p_idx] = page_line_bboxes
+            # Pre-extract per-page features using pdfplumber
+            page_features: List[PageFeatures] = self._preextract_page_features()
 
             for page_index, layout in enumerate(
                 tqdm(layouts, desc="Extracting markdown from pages")
             ):
                 lines = self._collect_text_lines(layout)
-                header_map = self.font_analyzer.build_header_level_map(lines)
-                body_size = self.font_analyzer.estimate_body_size(lines)
+                header_map = self._font_analyzer.build_header_level_map(lines)
+                body_size = self._font_analyzer.estimate_body_size(lines)
                 page_height = float(layout.bbox[3])
-                page_tables = tables_by_page.get(page_index, [])
+                pf = page_features[page_index] if page_index < len(page_features) else PageFeatures([], [], [])
+                page_tables = pf.tables
                 items = self._build_items(lines, page_tables, page_height)
                 page_md = self._build_page_markdown_from_items(
                     items,
                     header_map,
                     body_size,
                     page_height,
-                    hyperlinks_by_page.get(page_index, []),
-                    lines_by_page.get(page_index, []),
+                    pf.hyperlinks,
+                    pf.horizontal_lines,
                 )
                 page_md = self._post_process(page_md)
                 pages_md.append(page_md)
 
-            # Join pages using four newlines as separators
-            combined = ("\n\n\n\n").join(p.strip("\n") for p in pages_md)
-            # Do not post-process combined to preserve four-newline page separators
             _logger.info("Markdown extracted from %s", self.pdf_path.name)
-            return combined, pages_md
+            return pages_md
         except Exception as exc:  # pragma: no cover - defensive logging
             _logger.exception("Failed to extract markdown: %s", exc)
-            return "", []
+            return []
+
+    def _preextract_page_features(self) -> List[PageFeatures]:
+        """Pre-extract tables, hyperlinks, and line segments per page using pdfplumber.
+
+        Returns:
+            List[PageFeatures]: Sequence aligned with pdf pages, containing features.
+        """
+        features: List[PageFeatures] = []
+        try:
+            with pdfplumber.open(str(self.pdf_path)) as plumber_pdf:
+                for _page_index, plumber_page in enumerate(plumber_pdf.pages):
+                    # Tables
+                    page_tables: List[Dict[str, Any]] = []
+                    for table in plumber_page.find_tables():
+                        try:
+                            content = table.extract()
+                            bbox = table.bbox
+                            if content:
+                                page_tables.append({"bbox": bbox, "content": content})
+                        except Exception:
+                            continue
+
+                    # Hyperlinks
+                    page_links: List[Dict[str, Any]] = []
+                    for link in getattr(plumber_page, "hyperlinks", []) or []:
+                        try:
+                            uri = link.get("uri") or link.get("url")
+                            if not uri:
+                                continue
+                            x0 = float(link.get("x0"))
+                            x1 = float(link.get("x1"))
+                            top = float(link.get("top"))
+                            bottom = float(link.get("bottom"))
+                            page_links.append({"bbox": (x0, top, x1, bottom), "uri": uri})
+                        except Exception:
+                            continue
+
+                    # Page lines (for strikethrough detection)
+                    page_line_bboxes: List[Tuple[float, float, float, float]] = []
+                    for line in getattr(plumber_page, "lines", []) or []:
+                        try:
+                            x0 = float(line.get("x0"))
+                            x1 = float(line.get("x1"))
+                            top = float(line.get("top"))
+                            bottom = float(line.get("bottom"))
+                            page_line_bboxes.append((x0, top, x1, bottom))
+                        except Exception:
+                            continue
+
+                    features.append(
+                        PageFeatures(
+                            tables=page_tables,
+                            hyperlinks=page_links,
+                            horizontal_lines=page_line_bboxes,
+                        )
+                    )
+        except Exception:
+            # In case of any failure, return what we have (possibly empty)
+            return features
+        return features
 
     # ---------- Page processing helpers ----------
 
@@ -317,7 +336,7 @@ class FastMarkdown:
         base_left = min(line_lefts) if line_lefts else 0.0
         indent_step = _estimate_indent_step(line_lefts)
 
-        md_parts: List[str] = []
+        markdown_lines: List[str] = []
         list_state = ListState()
         last_y1: Optional[float] = None
         last_sizes: List[float] = []
@@ -346,11 +365,11 @@ class FastMarkdown:
             if it["type"] == "table":
                 # Close code block if open
                 if code_block_open:
-                    md_parts.append("```")
+                    markdown_lines.append("```")
                     code_block_open = False
-                md_parts.append("")
-                md_parts.append(self._table_to_markdown(it["data"]))
-                md_parts.append("")
+                markdown_lines.append("")
+                markdown_lines.append(self._table_to_markdown(it["data"]))
+                markdown_lines.append("")
                 self._reset_list_state(list_state)
                 continue
 
@@ -376,7 +395,7 @@ class FastMarkdown:
                 font_changed = abs(avg_curr - avg_last) > 1.0
                 prev_end_sentence = bool(re.search(r"[.!?]\s*$", prev_plain or ""))
                 if (y_gap > 2.0 or font_changed) and prev_end_sentence and not code_block_open:
-                    md_parts.append("")
+                    markdown_lines.append("")
 
             max_size = max(sizes) if sizes else 0.0
             level = self._header_level_for_size(max_size, header_map)
@@ -424,13 +443,13 @@ class FastMarkdown:
 
             if _is_horizontal_rule(text):
                 if code_block_open:
-                    md_parts.append("```")
+                    markdown_lines.append("```")
                     code_block_open = False
-                md_parts.append("---")
+                markdown_lines.append("---")
                 self._reset_list_state(list_state)
             elif header_ok:
                 if code_block_open:
-                    md_parts.append("```")
+                    markdown_lines.append("```")
                     code_block_open = False
                 hlevel = min(level, 3)
                 candidate = f"{'#' * hlevel} {text}"
@@ -439,13 +458,13 @@ class FastMarkdown:
                 if candidate not in emitted_headers and (
                     not last_emitted_ordered_label or _norm_header(text) != _norm_header(last_emitted_ordered_label)
                 ):
-                    md_parts.append(candidate)
+                    markdown_lines.append(candidate)
                     last_emitted_line = candidate
                     emitted_headers.add(candidate)
                 self._reset_list_state(list_state)
             elif is_bullet_like:
                 if code_block_open:
-                    md_parts.append("```")
+                    markdown_lines.append("```")
                     code_block_open = False
                 # Normalize task list checkboxes if present
                 content = self._normalize_task_checkbox(_convert_bullet(text))
@@ -467,38 +486,36 @@ class FastMarkdown:
                 else:
                     candidate = _indent(nest_level) + content
                     if candidate != (last_emitted_line or ""):
-                        md_parts.append(candidate)
+                        markdown_lines.append(candidate)
                         last_emitted_line = candidate
                     if has_desc:
                         emitted_bullet_labels.add(base_label)
-                # Record last bullet label in list state for echo suppression
-                list_state.last_item_text = base_label or None
                 self._set_list_state(list_state, kind="unordered", indent=nest_level)
             elif is_ordered:
                 if code_block_open:
-                    md_parts.append("```")
+                    markdown_lines.append("```")
                     code_block_open = False
                 normalized = _normalize_ordered_item(text)
                 candidate = _indent(indent_level) + normalized
                 if candidate != (last_emitted_line or ""):
-                    md_parts.append(candidate)
+                    markdown_lines.append(candidate)
                     last_emitted_line = candidate
                 # Track last ordered label for de-duplication
                 last_emitted_ordered_label = re.sub(r"^\s*\d+\.\s*", "", normalized).strip()
                 self._set_list_state(list_state, kind="ordered", indent=indent_level)
             elif text.startswith(">") or (indent_level >= 2 and is_italicish):
                 if code_block_open:
-                    md_parts.append("```")
+                    markdown_lines.append("```")
                     code_block_open = False
                 candidate = ("> " + text) if not text.startswith(">") else text
                 if candidate != (last_emitted_line or ""):
-                    md_parts.append(candidate)
+                    markdown_lines.append(candidate)
                     last_emitted_line = candidate
                 self._reset_list_state(list_state)
             elif list_intro_active:
                 # Treat as bullet following a list-intro ending with ':'
                 if code_block_open:
-                    md_parts.append("```")
+                    markdown_lines.append("```")
                     code_block_open = False
                 base_label = text.split(":", 1)[0].strip()
                 def _norm_label2(s: str) -> str:
@@ -509,7 +526,7 @@ class FastMarkdown:
                 else:
                     candidate = _indent(max(indent_level, list_intro_indent)) + "- " + text
                     if candidate != (last_emitted_line or ""):
-                        md_parts.append(candidate)
+                        markdown_lines.append(candidate)
                         last_emitted_line = candidate
                     emitted_bullet_labels.add(base_label)
                 self._set_list_state(
@@ -517,18 +534,18 @@ class FastMarkdown:
                 )
             elif looks_code:
                 if not code_block_open and consecutive_code_lines >= 2:
-                    md_parts.append("```")
+                    markdown_lines.append("```")
                     code_block_open = True
                 if code_block_open:
                     candidate = text_raw.strip()
                     if candidate != (last_emitted_line or ""):
-                        md_parts.append(candidate)
+                        markdown_lines.append(candidate)
                         last_emitted_line = candidate
                 else:
                     # Single code-like line: inline fence
                     candidate = f"`{text}`"
                     if candidate != (last_emitted_line or ""):
-                        md_parts.append(candidate)
+                        markdown_lines.append(candidate)
                         last_emitted_line = candidate
                 self._reset_list_state(list_state)
             else:
@@ -547,7 +564,7 @@ class FastMarkdown:
                 ):
                     pass
                 elif decorated != (last_emitted_line or ""):
-                    md_parts.append(decorated)
+                    markdown_lines.append(decorated)
                     last_emitted_line = decorated
                 self._reset_list_state(list_state)
 
@@ -563,9 +580,9 @@ class FastMarkdown:
             last_sizes = sizes
 
         if code_block_open:
-            md_parts.append("```")
+            markdown_lines.append("```")
 
-        return "\n".join(md_parts) + "\n"
+        return "\n".join(markdown_lines) + "\n"
 
     @staticmethod
     def _auto_linkify(text: str) -> str:
@@ -712,7 +729,6 @@ class FastMarkdown:
         state.active = False
         state.kind = "none"
         state.indent_level = 0
-        state.prev_line_left = None
 
     @staticmethod
     def _set_list_state(state: ListState, kind: str, indent: int) -> None:
@@ -760,7 +776,7 @@ class FastMarkdown:
             return content
 
 
-def main() -> Tuple[str, List[str]]:
+def main() -> List[str]:
     parser = argparse.ArgumentParser(
         description="Extract markdown-formatted content from a PDF using pdfminer.six."
     )
@@ -781,8 +797,8 @@ def main() -> Tuple[str, List[str]]:
         raise ValueError(f"File is not a PDF: {pdf_path}")
 
     extractor = FastMarkdown(pdf_path)
-    combined, pages = extractor.extract()
-    return combined, pages
+    pages = extractor.extract()
+    return pages
 
 
 if __name__ == "__main__":
