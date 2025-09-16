@@ -7,6 +7,7 @@ import io
 from pydantic import BaseModel
 import asyncio
 from .utils import get_device_config
+from .fast import FastMarkdown
 from .llm import LLM
 import nest_asyncio
 import logging
@@ -57,6 +58,7 @@ class VisionParser:
         extraction_complexity: bool = False,
         enable_concurrency: bool = False,
         num_workers: Optional[int] = None,
+        fast_mode: bool = False,
         **kwargs: Any,
     ):
         """Initialize parser with PDFPageConfig and LLM configuration."""
@@ -64,6 +66,7 @@ class VisionParser:
         self.device, auto_num_workers = get_device_config()
         self.num_workers = num_workers if num_workers is not None else auto_num_workers
         self.enable_concurrency = enable_concurrency
+        self.fast_mode = fast_mode
 
         if extraction_complexity:
             if not detailed_extraction:
@@ -150,7 +153,11 @@ class VisionParser:
             await asyncio.sleep(0.5)
 
     def convert_pdf(self, pdf_path: Union[str, Path]) -> List[str]:
-        """Convert all pages in the given PDF file to markdown text."""
+        """Convert all pages in the given PDF file to markdown text.
+
+        If fast_mode is enabled, use the pdfminer/pdfplumber-based fast extractor
+        to produce markdown without invoking vision models.
+        """
         pdf_path = Path(pdf_path)
         converted_pages = []
 
@@ -159,6 +166,13 @@ class VisionParser:
 
         if pdf_path.suffix.lower() != ".pdf":
             raise UnsupportedFileError(f"File is not a PDF: {pdf_path}")
+
+        # Fast path: use fast extractor and return per-page results
+        if self.fast_mode:
+            extractor = FastMarkdown(pdf_path)
+            combined, pages = extractor.extract()
+            # Return list of per-page markdowns
+            return pages if pages else ([] if combined == "" else [combined])
 
         pdf_document = None
         try:

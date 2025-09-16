@@ -1,6 +1,5 @@
 import argparse
 import logging
-import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,16 +13,8 @@ from tqdm import tqdm
 
 
 # Hardcoded configuration (no external config dependency)
-OUTPUT_DIR = "outputs"
-PAGE_DELIMITER = "<||WXb23TXrUn3Rxz00yNNr89HV||>"
 BULLET_CHARS = "•◦▪▫●○*·–—-"
-
-
 _logger = logging.getLogger(__name__)
-
-
-def _ensure_output_dir(path: Path) -> None:
-    path.mkdir(parents=True, exist_ok=True)
 
 
 def _clean_text(text: str) -> str:
@@ -137,21 +128,10 @@ class FontSizeAnalyzer:
         return float(median(sorted(sizes)))
 
 
-class MarkdownWriter:
-    """Persist markdown output for a given PDF file."""
-
-    def __init__(self, output_dir: Path) -> None:
-        self.output_dir = output_dir
-        _ensure_output_dir(self.output_dir)
-
-    def save(self, pdf_path: Path, content: str) -> Path:
-        target = self.output_dir / f"{pdf_path.stem}.md"
-        with target.open("w", encoding="utf-8") as f:
-            f.write(content)
-        return target
+ 
 
 
-class PDFMinerMarkdownExtractor:
+class FastMarkdown:
     """Extract markdown-formatted content from a PDF using pdfminer.six for text
     and pdfplumber for tables.
 
@@ -159,14 +139,11 @@ class PDFMinerMarkdownExtractor:
       - Iterate PDF pages with layout analysis
       - Infer basic structure: headers, paragraphs, lists
       - Build per-page and combined markdown
-      - Save to outputs directory
     """
 
     def __init__(self, pdf_path: Path) -> None:
         self.pdf_path = pdf_path
-        self.output_dir = Path(OUTPUT_DIR)
         self.font_analyzer = FontSizeAnalyzer()
-        self.writer = MarkdownWriter(self.output_dir)
 
     def extract(self) -> Tuple[str, List[str]]:
         try:
@@ -253,10 +230,10 @@ class PDFMinerMarkdownExtractor:
                 page_md = self._post_process(page_md)
                 pages_md.append(page_md)
 
-            combined = PAGE_DELIMITER.join(pages_md)
-            combined = self._post_process(combined)
-            saved_path = self.writer.save(self.pdf_path, combined)
-            _logger.info("Markdown saved to %s", saved_path)
+            # Join pages using four newlines as separators
+            combined = ("\n\n\n\n").join(p.strip("\n") for p in pages_md)
+            # Do not post-process combined to preserve four-newline page separators
+            _logger.info("Markdown extracted from %s", self.pdf_path.name)
             return combined, pages_md
         except Exception as exc:  # pragma: no cover - defensive logging
             _logger.exception("Failed to extract markdown: %s", exc)
@@ -274,179 +251,6 @@ class PDFMinerMarkdownExtractor:
         # Sort by (y1 desc, x0 asc) for visual reading order
         lines.sort(key=lambda ln: (-ln.bbox[3], ln.bbox[0]))
         return lines
-
-    def _build_page_markdown(
-        self, lines: List[LTTextLine], header_map: Dict[float, int], body_size: float
-    ) -> str:
-        if not lines:
-            return ""
-
-        # Estimate indentation baseline and step
-        line_lefts = [ln.bbox[0] for ln in lines]
-        base_left = min(line_lefts) if line_lefts else 0.0
-        indent_step = _estimate_indent_step(line_lefts)
-
-        md_parts: List[str] = []
-        last_y1: Optional[float] = None
-        last_sizes: List[float] = []
-        list_state = ListState()
-        prev_plain = ""
-        # Track emitted labels to avoid echoing
-        emitted_bullet_labels: set[str] = set()
-        last_emitted_ordered_label: Optional[str] = None
-
-        for line in lines:
-            left, _, _, y1 = line.bbox
-            sizes = _line_font_sizes(line)
-            names = _line_fontnames(line)
-            text_raw = line.get_text() or ""
-            text_raw = text_raw.replace("\n", " ")
-            text = _clean_text(text_raw)
-
-            if not text:
-                prev_plain = text
-                last_y1 = y1
-                last_sizes = sizes
-                continue
-
-            # Paragraph break heuristic
-            if last_y1 is not None:
-                avg_last = sum(last_sizes) / len(last_sizes) if last_sizes else 0.0
-                avg_curr = sum(sizes) / len(sizes) if sizes else 0.0
-                y_gap = abs(y1 - last_y1)
-                font_changed = abs(avg_curr - avg_last) > 1.0
-                prev_end_sentence = bool(re.search(r"[.!?]\s*$", prev_plain or ""))
-                if (y_gap > 2.0 or font_changed) and prev_end_sentence:
-                    md_parts.append("")  # blank line
-
-            max_size = max(sizes) if sizes else 0.0
-            level = self._header_level_for_size(max_size, header_map)
-
-            total_chars = max(len(sizes), 1)
-            bold_ratio = sum(1 for n in names if _is_bold_fontname(n)) / float(total_chars)
-            italic_ratio = sum(1 for n in names if _is_italic_fontname(n)) / float(total_chars)
-            is_boldish = bold_ratio > 0.3
-            is_italicish = italic_ratio > 0.3
-
-            # Header eligibility
-            word_count = len(text.split())
-            ends_punct = bool(re.search(r"[.!?:]\s*$", text))
-            size_delta = float(max_size) - float(body_size)
-            is_bullet_like = _is_bullet_text(text)
-            is_ordered = _is_ordered_item(text)
-            contains_brackets = "[" in text and ")" in text
-
-            header_ok = (
-                level > 0
-                and not is_bullet_like
-                and not is_ordered
-                and not contains_brackets
-                and not ends_punct
-                and word_count <= 12
-                and size_delta >= 2.0
-            )
-
-            # Indentation level from left position
-            indent_level = 0
-            if indent_step > 0:
-                indent_level = max(0, int(round((left - base_left) / indent_step)))
-
-            # Horizontal rule
-            if _is_horizontal_rule(text):
-                md_parts.append("---")
-                self._reset_list_state(list_state)
-            elif header_ok:
-                hlevel = min(level, 3)
-                candidate = f"{'#' * hlevel} {text}"
-                if not md_parts or md_parts[-1] != candidate:
-                    md_parts.append(candidate)
-                self._reset_list_state(list_state)
-            elif is_bullet_like:
-                content = _convert_bullet(text)
-                # If currently inside an ordered list, ensure bullets nest at least one level deeper
-                nest_level = indent_level
-                if list_state.kind == "ordered" and nest_level <= list_state.indent_level:
-                    nest_level = list_state.indent_level + 1
-                candidate = _indent(nest_level) + content
-                if not md_parts or md_parts[-1] != candidate:
-                    md_parts.append(candidate)
-                # Record base label for later echo suppression (e.g., "Label: desc")
-                base_label = re.sub(r"^[-*+]\s*", "", content)
-                base_label = base_label.split(":", 1)[0].strip()
-                if base_label:
-                    emitted_bullet_labels.add(base_label)
-                self._set_list_state(list_state, kind="unordered", indent=nest_level)
-            elif is_ordered:
-                normalized = _normalize_ordered_item(text)
-                candidate = _indent(indent_level) + normalized
-                if not md_parts or md_parts[-1] != candidate:
-                    md_parts.append(candidate)
-                # Remember last ordered label content for suppression
-                last_emitted_ordered_label = re.sub(r"^\s*\d+\.\s*", "", normalized).strip()
-                self._set_list_state(list_state, kind="ordered", indent=indent_level)
-            else:
-                # Handle lines that continue a list implicitly
-                x_close_threshold = max(6.0, indent_step * 0.6)
-                x_is_close = (
-                    list_state.prev_line_left is not None
-                    and abs(left - list_state.prev_line_left) <= x_close_threshold
-                )
-                if text and list_state.kind == "unordered" and (
-                    indent_level == list_state.indent_level or x_is_close
-                ):
-                    # Skip label-only echoes if they match previously emitted bullet labels
-                    def _norm_lbl(s: str) -> str:
-                        return re.sub(r"\W+", " ", s).strip().lower()
-                    if _norm_lbl(text) in { _norm_lbl(lbl) for lbl in emitted_bullet_labels }:
-                        pass
-                    else:
-                        candidate = _indent(indent_level) + "- " + text
-                        if candidate != (md_parts[-1] if md_parts else ""):
-                            md_parts.append(candidate)
-                elif text and list_state.kind == "ordered" and (
-                    indent_level >= list_state.indent_level or x_is_close
-                ):
-                    target = (
-                        indent_level
-                        if indent_level > list_state.indent_level
-                        else (list_state.indent_level + 1)
-                    )
-                    # Skip label-only echoes if they match the last ordered label
-                    def _norm_lbl2(s: str) -> str:
-                        return re.sub(r"\W+", " ", s).strip().lower()
-                    if last_emitted_ordered_label and _norm_lbl2(text) == _norm_lbl2(last_emitted_ordered_label):
-                        pass
-                    else:
-                        candidate = _indent(target) + "- " + text
-                        if candidate != (md_parts[-1] if md_parts else ""):
-                            md_parts.append(candidate)
-                        list_state.indent_level = target
-                        list_state.kind = "unordered"
-                else:
-                    # Regular paragraph line
-                    # Apply light emphasis if bold/italic dominated
-                    decorated = text
-                    if is_boldish and is_italicish:
-                        decorated = f"***{decorated}***"
-                    elif is_boldish:
-                        decorated = f"**{decorated}**"
-                    elif is_italicish:
-                        decorated = f"*{decorated}*"
-                    # Suppress plain label echoes that were already emitted as bullets
-                    def _norm_plain2(s: str) -> str:
-                        return re.sub(r"\W+", " ", s).strip().lower()
-                    if _norm_plain2(decorated) in { _norm_plain2(lbl) for lbl in emitted_bullet_labels }:
-                        pass
-                    elif not md_parts or md_parts[-1] != decorated:
-                        md_parts.append(decorated)
-                    self._reset_list_state(list_state)
-
-            prev_plain = text
-            last_y1 = y1
-            last_sizes = sizes
-            list_state.prev_line_left = left
-
-        return "\n".join(md_parts) + "\n"
 
     # ---------- Integrated text + tables rendering ----------
 
@@ -800,7 +604,7 @@ class PDFMinerMarkdownExtractor:
                 [
                     ""
                     if cell is None
-                    else PDFMinerMarkdownExtractor._normalize_cell_text(str(cell))
+                    else FastMarkdown._normalize_cell_text(str(cell))
                     for cell in row
                 ]
                 for row in table
@@ -976,7 +780,7 @@ def main() -> Tuple[str, List[str]]:
     if pdf_path.suffix.lower() != ".pdf":
         raise ValueError(f"File is not a PDF: {pdf_path}")
 
-    extractor = PDFMinerMarkdownExtractor(pdf_path)
+    extractor = FastMarkdown(pdf_path)
     combined, pages = extractor.extract()
     return combined, pages
 
