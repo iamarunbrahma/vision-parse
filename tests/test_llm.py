@@ -245,15 +245,12 @@ async def test_azure_openai_generate_markdown(
 
 
 @pytest.mark.asyncio
-@patch("google.generativeai.GenerativeModel")
+@patch("google.genai.Client")
 async def test_gemini_generate_markdown(
-    MockGenerativeModel, sample_base64_image, mock_pixmap
+    MockGenaiClient, sample_base64_image, mock_pixmap
 ):
-    """Test markdown generation using Gemini."""
-    mock_client = AsyncMock()
-    MockGenerativeModel.return_value = mock_client
-
-    # Mock responses for both structured analysis and markdown generation
+    """Test markdown generation using Gemini (google-genai SDK)."""
+    # Prepare mocked responses
     mock_response1 = AsyncMock()
     mock_response1.text = json.dumps(
         {
@@ -268,12 +265,19 @@ async def test_gemini_generate_markdown(
     mock_response2 = AsyncMock()
     mock_response2.text = "# Test Header\n\nTest content"
 
-    mock_client.generate_content_async = AsyncMock(
+    # Build the nested async client shape used by the implementation
+    mock_async_models = MagicMock()
+    mock_async_models.generate_content = AsyncMock(
         side_effect=[mock_response1, mock_response2]
     )
+    mock_client_instance = MagicMock()
+    mock_client_instance.aio = MagicMock()
+    mock_client_instance.aio.models = mock_async_models
+
+    MockGenaiClient.return_value = mock_client_instance
 
     llm = LLM(
-        model_name="gemini-1.5-pro",
+        model_name="gemini-2.5-pro",
         api_key="test-key",
         temperature=0.7,
         top_p=0.7,
@@ -291,7 +295,7 @@ async def test_gemini_generate_markdown(
 
     assert isinstance(result, str)
     assert "Test content" in result
-    assert mock_client.generate_content_async.call_count == 2
+    assert mock_async_models.generate_content.call_count == 2
 
 
 

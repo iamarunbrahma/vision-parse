@@ -1,4 +1,4 @@
-from typing import Literal, Dict, Any, Union, Optional
+from typing import Literal, Dict, Any, Union
 from pydantic import BaseModel
 from jinja2 import Template
 import re
@@ -43,6 +43,15 @@ class LLM:
         )
     except Exception as e:
         raise FileNotFoundError(f"Failed to load prompt files: {str(e)}")
+
+    # Accessors for class-level Jinja2 templates to keep instance usage consistent
+    @property
+    def _image_analysis_prompt(self) -> Template:
+        return self._IMAGE_ANALYSIS_PROMPT
+
+    @property
+    def _md_prompt_template(self) -> Template:
+        return self._MD_PROMPT_TEMPLATE
 
     def __init__(
         self,
@@ -103,7 +112,7 @@ class LLM:
                             bars[current_digest].close()
 
                         if not digest:
-                            logger.info(progress.get("status"))
+                            _logger.info(progress.get("status"))
                             continue
 
                         if digest not in bars and (total := progress.get("total")):
@@ -264,14 +273,14 @@ class LLM:
         elif self.provider == "gemini":
             try:
                 from google import genai
-                from google.genai import types, errors
             except ImportError:
                 raise ImportError(
                     "Gemini is not installed. Please install it using pip install 'vision-parse[gemini]'."
                 )
 
             try:
-                self.client = genai.Client(api_key=self.api_key)
+                self._genai = genai
+                self.client = self._genai.Client(api_key=self.api_key)
                 self.model_name = self.model_name
             except Exception as e:
                 raise LLMError(f"Unable to initialize Gemini client: {str(e)}")
@@ -352,7 +361,7 @@ class LLM:
                 )
 
             except Exception:
-                logger.warning(
+                _logger.warning(
                     "Detailed extraction failed. Falling back to simple extraction."
                 )
                 self.detailed_extraction = False
@@ -553,13 +562,13 @@ class LLM:
                 response = await self.client.aio.models.generate_content(
                     model=self.model_name,
                     contents=[
-                        types.Part.from_bytes(
+                        self._genai.types.Part.from_bytes(
                             data=image_bytes,
                             mime_type="image/png"
                         ),
                         prompt
                     ],
-                    config=types.GenerateContentConfig(
+                    config=self._genai.types.GenerateContentConfig(
                         response_mime_type="application/json" if structured else None,
                         response_schema=ImageDescription if structured else None,
                         temperature=0.0 if structured else self.temperature,
@@ -571,13 +580,13 @@ class LLM:
                 response = self.client.models.generate_content(
                     model=self.model_name,
                     contents=[
-                        types.Part.from_bytes(
+                        self._genai.types.Part.from_bytes(
                             data=image_bytes,
                             mime_type="image/png"
                         ),
                         prompt
                     ],
-                    config=types.GenerateContentConfig(
+                    config=self._genai.types.GenerateContentConfig(
                         response_mime_type="application/json" if structured else None,
                         response_schema=ImageDescription if structured else None,
                         temperature=0.0 if structured else self.temperature,
@@ -589,7 +598,7 @@ class LLM:
             return re.sub(
                 r"```(?:markdown)?\n(.*?)\n```", r"\1", response.text, flags=re.DOTALL
             )
-        except errors.APIError as e:
+        except self._genai.errors.APIError as e:
             raise LLMError(f"Gemini API error: {str(e)}")
         except Exception as e:
             raise LLMError(f"Gemini Model processing failed: {str(e)}")
