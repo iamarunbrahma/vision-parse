@@ -14,11 +14,11 @@ def discover_ollama_vision_models() -> Dict[str, str]:
     try:
         import ollama
         from .model_detector import ModelDetector
-        
+
         client = ollama.Client()
         detector = ModelDetector(client)
         vision_models = detector.get_vision_models()
-        
+
         return {model: "ollama" for model in vision_models}
     except Exception:
         return {}

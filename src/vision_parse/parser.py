@@ -7,10 +7,11 @@ import io
 from pydantic import BaseModel
 import asyncio
 from .utils import get_device_config
-from .llm import LLM
+from .llm import LLM, LLMError
 import nest_asyncio
 import logging
 import warnings
+from contextlib import suppress
 
 logger = logging.getLogger(__name__)
 nest_asyncio.apply()
@@ -99,10 +100,10 @@ class VisionParser:
         # Calculate zoom factor based on target DPI
         zoom = self.page_config.dpi / 72
         scale = zoom * 2
-        
+
         # Get page rotation
         rotation = page.get_rotation()
-        
+
         return scale, rotation
 
     async def _convert_page(self, page: pdfium.PdfPage, page_number: int) -> str:
@@ -159,40 +160,45 @@ class VisionParser:
         if pdf_path.suffix.lower() != ".pdf":
             raise UnsupportedFileError(f"File is not a PDF: {pdf_path}")
 
+        pdf_document = None
         try:
-            with pdfium.PdfDocument(pdf_path) as pdf_document:
-                total_pages = len(pdf_document)
+            pdf_document = pdfium.PdfDocument(pdf_path)
+            total_pages = len(pdf_document)
 
-                with tqdm(
-                    total=total_pages,
-                    desc="Converting pages in PDF file into markdown format",
-                ) as pbar:
-                    if self.enable_concurrency:
-                        # Process pages in batches based on num_workers
-                        for i in range(0, total_pages, self.num_workers):
-                            batch_size = min(self.num_workers, total_pages - i)
-                            # Extract only required pages for the batch
-                            batch_pages = [
-                                pdf_document.get_page(j) for j in range(i, i + batch_size)
-                            ]
-                            batch_results = asyncio.run(
-                                self._convert_pages_batch(batch_pages, i)
-                            )
-                            converted_pages.extend(batch_results)
-                            pbar.update(len(batch_results))
-                    else:
-                        for page_number in range(total_pages):
-                            # For non-concurrent processing, still need to run async code
-                            page = pdf_document.get_page(page_number)
-                            text = asyncio.run(
-                                self._convert_page(page, page_number)
-                            )
-                            converted_pages.append(text)
-                            pbar.update(1)
+            with tqdm(
+                total=total_pages,
+                desc="Converting pages in PDF file into markdown format",
+            ) as pbar:
+                if self.enable_concurrency:
+                    # Process pages in batches based on num_workers
+                    for i in range(0, total_pages, self.num_workers):
+                        batch_size = min(self.num_workers, total_pages - i)
+                        # Extract only required pages for the batch
+                        batch_pages = [
+                            pdf_document.get_page(j)
+                            for j in range(i, i + batch_size)
+                        ]
+                        batch_results = asyncio.run(
+                            self._convert_pages_batch(batch_pages, i)
+                        )
+                        converted_pages.extend(batch_results)
+                        pbar.update(len(batch_results))
+                else:
+                    for page_number in range(total_pages):
+                        # For non-concurrent processing, still need to run async code
+                        page = pdf_document.get_page(page_number)
+                        text = asyncio.run(
+                            self._convert_page(page, page_number)
+                        )
+                        converted_pages.append(text)
+                        pbar.update(1)
 
-                return converted_pages
-
+            return converted_pages
         except Exception as e:
             raise VisionParserError(
                 f"Failed to convert PDF file into markdown content: {str(e)}"
             )
+        finally:
+            if pdf_document is not None:
+                with suppress(Exception):
+                    pdf_document.close()

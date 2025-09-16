@@ -18,7 +18,7 @@ class ImageExtractionError(Exception):
 class ImageData:
     image_url: str
     base64_encoded: Optional[str] = None
-    
+
     _lock: ClassVar[Lock] = Lock()
 
     @staticmethod
@@ -71,14 +71,16 @@ class ImageData:
                 min_width, min_height = min_dimensions
                 # Convert pypdfium2 bitmap to numpy array
                 page_array = bitmap.to_numpy()
-                
+
                 # pypdfium2 uses BGR by default, but we need to handle different formats
                 if page_array.shape[2] == 4:  # BGRA format
                     page_image = cv2.cvtColor(page_array, cv2.COLOR_BGRA2BGR)
                 elif page_array.shape[2] == 3:  # BGR format (default for pypdfium2)
                     page_image = page_array
                 else:
-                    raise ImageExtractionError(f"Unsupported image format with {page_array.shape[2]} channels")
+                    raise ImageExtractionError(
+                        f"Unsupported image format with {page_array.shape[2]} channels"
+                    )
                 processed_image = cls._prepare_image_for_detection(page_image)
 
                 contours, _ = cv2.findContours(

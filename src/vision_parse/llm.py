@@ -95,11 +95,13 @@ class LLM:
 
             host = self.ollama_config.get("OLLAMA_HOST", "http://localhost:11434")
             timeout = self.ollama_config.get("OLLAMA_REQUEST_TIMEOUT", 240.0)
-            
+
             self.client = ollama.Client(host=host, timeout=timeout, trust_env=False)
-            
+
             if self.enable_concurrency:
-                self.aclient = ollama.AsyncClient(host=host, timeout=timeout, trust_env=False)
+                self.aclient = ollama.AsyncClient(
+                    host=host, timeout=timeout, trust_env=False
+                )
 
             try:
                 self.client.show(self.model_name)
@@ -293,11 +295,10 @@ class LLM:
             dynamic_models = discover_ollama_vision_models()
             if model_name in dynamic_models:
                 return dynamic_models[model_name]
-            
+
             all_models = {**SUPPORTED_MODELS, **dynamic_models}
             supported_models = ", ".join(
-                f"'{model}' from {provider}"
-                for model, provider in all_models.items()
+                f"'{model}' from {provider}" for model, provider in all_models.items()
             )
             raise UnsupportedModelError(
                 f"Model '{model_name}' is not supported. "
@@ -557,42 +558,40 @@ class LLM:
         """Process base64-encoded image through Gemini vision models."""
         try:
             image_bytes = base64.b64decode(base64_encoded)
-            
+
             if self.enable_concurrency:
                 response = await self.client.aio.models.generate_content(
                     model=self.model_name,
                     contents=[
                         self._genai.types.Part.from_bytes(
-                            data=image_bytes,
-                            mime_type="image/png"
+                            data=image_bytes, mime_type="image/png"
                         ),
-                        prompt
+                        prompt,
                     ],
                     config=self._genai.types.GenerateContentConfig(
                         response_mime_type="application/json" if structured else None,
                         response_schema=ImageDescription if structured else None,
                         temperature=0.0 if structured else self.temperature,
                         top_p=0.4 if structured else self.top_p,
-                        **self.kwargs
-                    )
+                        **self.kwargs,
+                    ),
                 )
             else:
                 response = self.client.models.generate_content(
                     model=self.model_name,
                     contents=[
                         self._genai.types.Part.from_bytes(
-                            data=image_bytes,
-                            mime_type="image/png"
+                            data=image_bytes, mime_type="image/png"
                         ),
-                        prompt
+                        prompt,
                     ],
                     config=self._genai.types.GenerateContentConfig(
                         response_mime_type="application/json" if structured else None,
                         response_schema=ImageDescription if structured else None,
                         temperature=0.0 if structured else self.temperature,
                         top_p=0.4 if structured else self.top_p,
-                        **self.kwargs
-                    )
+                        **self.kwargs,
+                    ),
                 )
 
             return re.sub(

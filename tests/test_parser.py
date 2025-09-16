@@ -107,14 +107,16 @@ async def test_parser_with_base64_image_mode(mock_tqdm, mock_async_client, pdf_p
         mock_doc = MagicMock()
         mock_page = MagicMock()
         mock_bitmap = MagicMock()
-        mock_bitmap.to_numpy.return_value = b"\x00" * (200 * 200 * 3)  # Create correct size buffer
+        mock_bitmap.to_numpy.return_value = b"\x00" * (
+            200 * 200 * 3
+        )  # Create correct size buffer
         mock_bitmap.to_pil.return_value = MagicMock()
         mock_bitmap.close = MagicMock()
         mock_page.render.return_value = mock_bitmap
         mock_page.get_rotation.return_value = 0
         mock_doc.__len__.return_value = 1
         mock_doc.get_page.return_value = mock_page
-        mock_open.return_value.__enter__.return_value = mock_doc
+        mock_open.return_value = mock_doc
 
         # Mock tqdm
         mock_progress = MagicMock()
@@ -175,14 +177,16 @@ async def test_parser_with_concurrent_processing(
         mock_doc = MagicMock()
         mock_page = MagicMock()
         mock_bitmap = MagicMock()
-        mock_bitmap.to_numpy.return_value = b"\x00" * (200 * 200 * 3)  # Create correct size buffer
+        mock_bitmap.to_numpy.return_value = b"\x00" * (
+            200 * 200 * 3
+        )  # Create correct size buffer
         mock_bitmap.to_pil.return_value = MagicMock()
         mock_bitmap.close = MagicMock()
         mock_page.render.return_value = mock_bitmap
         mock_page.get_rotation.return_value = 0
         mock_doc.__len__.return_value = 2
         mock_doc.get_page.return_value = mock_page
-        mock_open.return_value.__enter__.return_value = mock_doc
+        mock_open.return_value = mock_doc
 
         # Mock tqdm
         mock_progress = MagicMock()

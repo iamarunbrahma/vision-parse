@@ -35,5 +35,11 @@ def markdown_parser(page_config):
 # Fixture handling PDF document lifecycle with proper cleanup
 @pytest.fixture
 def pdf_document(pdf_path):
-    with pdfium.PdfDocument(pdf_path) as doc:
+    doc = pdfium.PdfDocument(pdf_path)
+    try:
         yield doc
+    finally:
+        try:
+            doc.close()
+        except Exception:
+            pass
