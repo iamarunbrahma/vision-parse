@@ -7,7 +7,7 @@ import io
 from pydantic import BaseModel
 import asyncio
 from .utils import get_device_config
-from .llm import LLM, LLMError
+from .llm import LLM
 import nest_asyncio
 import logging
 import warnings
@@ -122,12 +122,12 @@ class VisionParser:
 
             # Convert bitmap to PIL Image and then to PNG bytes
             pil_image = bitmap.to_pil()
-            
+
             # Convert PIL image to base64 PNG
             buffer = io.BytesIO()
-            pil_image.save(buffer, format='PNG')
+            pil_image.save(buffer, format="PNG")
             base64_encoded = base64.b64encode(buffer.getvalue()).decode("utf-8")
-            
+
             return await self.llm.generate_markdown(base64_encoded, bitmap, page_number)
 
         except Exception as e:
@@ -175,8 +175,7 @@ class VisionParser:
                         batch_size = min(self.num_workers, total_pages - i)
                         # Extract only required pages for the batch
                         batch_pages = [
-                            pdf_document.get_page(j)
-                            for j in range(i, i + batch_size)
+                            pdf_document.get_page(j) for j in range(i, i + batch_size)
                         ]
                         batch_results = asyncio.run(
                             self._convert_pages_batch(batch_pages, i)
@@ -187,9 +186,7 @@ class VisionParser:
                     for page_number in range(total_pages):
                         # For non-concurrent processing, still need to run async code
                         page = pdf_document.get_page(page_number)
-                        text = asyncio.run(
-                            self._convert_page(page, page_number)
-                        )
+                        text = asyncio.run(self._convert_page(page, page_number))
                         converted_pages.append(text)
                         pbar.update(1)
 
