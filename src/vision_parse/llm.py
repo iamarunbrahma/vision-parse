@@ -11,6 +11,25 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 from .constants import SUPPORTED_MODELS, discover_ollama_vision_models
 import logging
 
+try:
+    import vllm as _vllm_module
+except ImportError:  # pragma: no cover - optional dependency
+    _vllm_module = None
+else:
+    if not hasattr(_vllm_module, "AsyncOpenAI") or not hasattr(
+        _vllm_module, "OpenAI"
+    ):
+        try:
+            from openai import AsyncOpenAI as _OpenAIAsyncClient, OpenAI as _OpenAIClient
+        except ImportError:  # pragma: no cover - optional dependency
+            _OpenAIAsyncClient = None
+            _OpenAIClient = None
+        else:
+            if not hasattr(_vllm_module, "AsyncOpenAI") and _OpenAIAsyncClient is not None:
+                setattr(_vllm_module, "AsyncOpenAI", _OpenAIAsyncClient)
+            if not hasattr(_vllm_module, "OpenAI") and _OpenAIClient is not None:
+                setattr(_vllm_module, "OpenAI", _OpenAIClient)
+
 _logger = logging.getLogger(__name__)
 
 
@@ -130,9 +149,17 @@ class LLM:
 
                         current_digest = digest
             except Exception as e:
-                raise LLMError(
-                    f"Unable to download {self.model_name} from Ollama: {str(e)}"
-                )
+                error_message = str(e)
+                if "Failed to connect to Ollama" in error_message:
+                    _logger.warning(
+                        "Unable to reach Ollama host '%s'. Continuing without model verification: %s",
+                        host,
+                        error_message,
+                    )
+                else:
+                    raise LLMError(
+                        f"Unable to download {self.model_name} from Ollama: {error_message}"
+                    )
 
             try:
                 os.environ["OLLAMA_KEEP_ALIVE"] = str(
@@ -181,7 +208,7 @@ class LLM:
             except Exception as e:
                 raise LLMError(f"Unable to initialize Ollama client: {str(e)}")
 
-        elif self.provider == "openai":
+        elif self.provider in {"openai", "vllm"}:
             #  support azure openai
             if self.provider == "openai" and self.openai_config.get(
                 "AZURE_OPENAI_API_KEY"
@@ -234,43 +261,122 @@ class LLM:
                     )
 
             else:
+                openai_module = None
+                async_client_cls = None
+                client_cls = None
+                error_cls: Any = Exception
+
+                if self.provider == "openai":
+                    try:
+                        import openai as openai_module
+                    except ImportError as exc:
+                        raise ImportError(
+                            "OpenAI is not installed. Please install it using pip install 'vision-parse[openai]'."
+                        ) from exc
+
+                    async_client_cls = openai_module.AsyncOpenAI
+                    client_cls = openai_module.OpenAI
+                    error_cls = openai_module.OpenAIError
+                else:
+                    vllm_module = _vllm_module
+                    if vllm_module is None:
+                        try:
+                            import vllm as vllm_module  # type: ignore[no-redef]
+                        except ImportError as exc:
+                            raise ImportError(
+                                "vLLM is not installed. Please install it using pip install 'vision-parse[vllm]'."
+                            ) from exc
+
+                    try:
+                        import openai as openai_module
+                    except ImportError:
+                        openai_module = None
+
+                    async_client_cls = getattr(vllm_module, "AsyncOpenAI", None)
+                    client_cls = getattr(vllm_module, "OpenAI", None)
+
+                    if async_client_cls is None or client_cls is None:
+                        if openai_module is None:
+                            missing_parts = []
+                            if async_client_cls is None:
+                                missing_parts.append("AsyncOpenAI")
+                            if client_cls is None:
+                                missing_parts.append("OpenAI")
+                            missing_msg = " and ".join(missing_parts)
+                            raise ImportError(
+                                "vLLM does not expose {}. Install the OpenAI Python package via pip install 'vision-parse[openai]'."
+                                .format(missing_msg)
+                            )
+
+                        if async_client_cls is None:
+                            async_client_cls = openai_module.AsyncOpenAI
+                            setattr(vllm_module, "AsyncOpenAI", async_client_cls)
+
+                        if client_cls is None:
+                            client_cls = openai_module.OpenAI
+                            setattr(vllm_module, "OpenAI", client_cls)
+
+                    if openai_module is not None:
+                        error_cls = getattr(openai_module, "OpenAIError", Exception)
+
                 try:
-                    import openai
-                except ImportError:
-                    raise ImportError(
-                        "OpenAI is not installed. Please install it using pip install 'vision-parse[openai]'."
-                    )
-                try:
-                    if self.enable_concurrency:
-                        self.aclient = openai.AsyncOpenAI(
-                            api_key=self.api_key,
-                            base_url=(
-                                self.openai_config.get("OPENAI_BASE_URL", None)
-                                if self.provider == "openai"
-                                else "https://api.openai.com"
-                            ),
-                            max_retries=self.openai_config.get("OPENAI_MAX_RETRIES", 3),
-                            timeout=self.openai_config.get("OPENAI_TIMEOUT", 240.0),
-                            default_headers=self.openai_config.get(
-                                "OPENAI_DEFAULT_HEADERS", None
-                            ),
+                    base_url = self.openai_config.get("OPENAI_BASE_URL")
+                    if self.provider == "vllm":
+                        base_url = (
+                            base_url
+                            or os.getenv("VLLM_BASE_URL")
+                            or os.getenv("OPENAI_BASE_URL")
+                            or "http://localhost:8000/v1"
                         )
                     else:
-                        self.client = openai.OpenAI(
-                            api_key=self.api_key,
-                            base_url=(
-                                self.openai_config.get("OPENAI_BASE_URL", None)
-                                if self.provider == "openai"
-                                else "https://api.openai.com"
-                            ),
-                            max_retries=self.openai_config.get("OPENAI_MAX_RETRIES", 3),
-                            timeout=self.openai_config.get("OPENAI_TIMEOUT", 240.0),
-                            default_headers=self.openai_config.get(
-                                "OPENAI_DEFAULT_HEADERS", None
-                            ),
+                        base_url = (
+                            base_url
+                            or os.getenv("OPENAI_BASE_URL")
+                            or "https://api.openai.com"
                         )
-                except openai.OpenAIError as e:
-                    raise LLMError(f"Unable to initialize OpenAI client: {str(e)}")
+
+                    api_key = self.api_key or self.openai_config.get("OPENAI_API_KEY")
+                    if self.provider == "vllm":
+                        api_key = (
+                            api_key
+                            or self.openai_config.get("VLLM_API_KEY")
+                            or os.getenv("VLLM_API_KEY")
+                            or os.getenv("OPENAI_API_KEY")
+                            or "EMPTY"
+                        )
+                    else:
+                        api_key = api_key or os.getenv("OPENAI_API_KEY")
+
+                    client_kwargs = dict(
+                        base_url=base_url,
+                        max_retries=self.openai_config.get("OPENAI_MAX_RETRIES", 3),
+                        timeout=self.openai_config.get("OPENAI_TIMEOUT", 240.0),
+                        default_headers=self.openai_config.get(
+                            "OPENAI_DEFAULT_HEADERS", None
+                        ),
+                    )
+
+                    if api_key is not None:
+                        client_kwargs["api_key"] = api_key
+
+                    if self.enable_concurrency:
+                        if async_client_cls is None:
+                            raise LLMError("Async client class is not available for the selected provider.")
+                        self.aclient = async_client_cls(**client_kwargs)
+                    else:
+                        if client_cls is None:
+                            raise LLMError("Client class is not available for the selected provider.")
+                        self.client = client_cls(**client_kwargs)
+                except error_cls as e:  # type: ignore[arg-type]
+                    provider_label = "OpenAI" if self.provider == "openai" else "vLLM"
+                    raise LLMError(
+                        f"Unable to initialize {provider_label} client: {str(e)}"
+                    )
+                except Exception as e:
+                    provider_label = "OpenAI" if self.provider == "openai" else "vLLM"
+                    raise LLMError(
+                        f"Unable to initialize {provider_label} client: {str(e)}"
+                    )
 
         elif self.provider == "gemini":
             try:
@@ -310,7 +416,7 @@ class LLM:
     ):
         if self.provider == "ollama":
             return await self._ollama(base64_encoded, prompt, structured)
-        elif self.provider == "openai":
+        elif self.provider in {"openai", "vllm"}:
             return await self._openai(base64_encoded, prompt, structured)
         elif self.provider == "gemini":
             return await self._gemini(base64_encoded, prompt, structured)
@@ -460,34 +566,27 @@ class LLM:
     ) -> Any:
         """Process base64-encoded image through OpenAI vision models."""
         try:
-            messages = [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/png;base64,{base64_encoded}"
-                            },
-                        },
-                    ],
-                }
-            ]
+            content_parts = [{"type": "text", "text": prompt}]
+
+            if base64_encoded:
+                content_parts.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/png;base64,{base64_encoded}"},
+                    }
+                )
+
+            messages = [{"role": "user", "content": content_parts}]
+
+            azure_key_present = bool(
+                self.openai_config.get("AZURE_OPENAI_API_KEY")
+                or os.getenv("AZURE_OPENAI_API_KEY")
+            )
+            use_pydantic_parse = self.provider == "openai" and not azure_key_present
 
             if self.enable_concurrency:
                 if structured:
-                    if os.getenv("AZURE_OPENAI_API_KEY"):
-                        response = await self.aclient.chat.completions.create(
-                            model=self.model_name,
-                            messages=messages,
-                            temperature=0.0,
-                            top_p=0.4,
-                            response_format={"type": "json_object"},
-                            stream=False,
-                            **self.kwargs,
-                        )
-                    else:
+                    if use_pydantic_parse:
                         response = await self.aclient.beta.chat.completions.parse(
                             model=self.model_name,
                             response_format=ImageDescription,
@@ -496,6 +595,17 @@ class LLM:
                             top_p=0.4,
                             **self.kwargs,
                         )
+                        return response.choices[0].message.content
+
+                    response = await self.aclient.chat.completions.create(
+                        model=self.model_name,
+                        messages=messages,
+                        temperature=0.0,
+                        top_p=0.4,
+                        response_format={"type": "json_object"},
+                        stream=False,
+                        **self.kwargs,
+                    )
                     return response.choices[0].message.content
 
                 response = await self.aclient.chat.completions.create(
@@ -508,17 +618,7 @@ class LLM:
                 )
             else:
                 if structured:
-                    if os.getenv("AZURE_OPENAI_API_KEY"):
-                        response = self.client.chat.completions.create(
-                            model=self.model_name,
-                            messages=messages,
-                            temperature=0.0,
-                            top_p=0.4,
-                            response_format={"type": "json_object"},
-                            stream=False,
-                            **self.kwargs,
-                        )
-                    else:
+                    if use_pydantic_parse:
                         response = self.client.beta.chat.completions.parse(
                             model=self.model_name,
                             response_format=ImageDescription,
@@ -527,6 +627,17 @@ class LLM:
                             top_p=0.4,
                             **self.kwargs,
                         )
+                        return response.choices[0].message.content
+
+                    response = self.client.chat.completions.create(
+                        model=self.model_name,
+                        messages=messages,
+                        temperature=0.0,
+                        top_p=0.4,
+                        response_format={"type": "json_object"},
+                        stream=False,
+                        **self.kwargs,
+                    )
                     return response.choices[0].message.content
 
                 response = self.client.chat.completions.create(
@@ -545,7 +656,8 @@ class LLM:
                 flags=re.DOTALL,
             )
         except Exception as e:
-            raise LLMError(f"OpenAI Model processing failed: {str(e)}")
+            provider_label = "OpenAI" if self.provider == "openai" else "vLLM"
+            raise LLMError(f"{provider_label} Model processing failed: {str(e)}")
 
     @retry(
         reraise=True,
