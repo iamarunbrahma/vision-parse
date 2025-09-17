@@ -99,10 +99,10 @@ def _is_italic_fontname(name: str) -> bool:
 
 @dataclass
 class ListState:
-    active: bool = False
+    """Lightweight state for list parsing."""
+
     kind: str = "none"  # 'none' | 'ordered' | 'unordered'
     indent_level: int = 0
-    
 
 
 @dataclass
@@ -115,9 +115,10 @@ class PageFeatures:
 
 
 class FontSizeAnalyzer:
-    """Analyze font sizes on a page to infer header levels and body size."""
+    """Analyze font sizes to infer header levels and body size."""
 
     def build_header_level_map(self, lines: List[LTTextLine]) -> Dict[float, int]:
+        """Build a mapping from font size to header level."""
         sizes: List[float] = []
         for line in lines:
             sizes.extend(_line_font_sizes(line))
@@ -128,6 +129,7 @@ class FontSizeAnalyzer:
         return level_map
 
     def estimate_body_size(self, lines: List[LTTextLine]) -> float:
+        """Estimate the median body font size for a page."""
         sizes: List[float] = []
         for line in lines:
             sizes.extend(_line_font_sizes(line))
@@ -140,20 +142,15 @@ class FontSizeAnalyzer:
 
 
 class FastMarkdown:
-    """Extract markdown-formatted content from a PDF using pdfminer.six for text
-    and pdfplumber for tables.
-
-    Responsibilities:
-      - Iterate PDF pages with layout analysis
-      - Infer basic structure: headers, paragraphs, lists
-      - Build per-page markdown only (no combined output)
-    """
+    """Extract per-page markdown using pdfminer.six (text) and pdfplumber (tables)."""
 
     def __init__(self, pdf_path: Path) -> None:
+        """Initialize extractor with a PDF path."""
         self.pdf_path = pdf_path
         self._font_analyzer = FontSizeAnalyzer()
 
     def extract(self) -> List[str]:
+        """Extract and return a list of markdown strings per page."""
         try:
             pages_md: List[str] = []
             params = LAParams(
@@ -199,11 +196,7 @@ class FastMarkdown:
             return []
 
     def _preextract_page_features(self) -> List[PageFeatures]:
-        """Pre-extract tables, hyperlinks, and line segments per page using pdfplumber.
-
-        Returns:
-            List[PageFeatures]: Sequence aligned with pdf pages, containing features.
-        """
+        """Collect tables, hyperlinks, and line segments per page via pdfplumber."""
         features: List[PageFeatures] = []
         try:
             with pdfplumber.open(str(self.pdf_path)) as plumber_pdf:
@@ -726,13 +719,13 @@ class FastMarkdown:
 
     @staticmethod
     def _reset_list_state(state: ListState) -> None:
-        state.active = False
+        """Reset list parsing state."""
         state.kind = "none"
         state.indent_level = 0
 
     @staticmethod
     def _set_list_state(state: ListState, kind: str, indent: int) -> None:
-        state.active = True
+        """Set list parsing state."""
         state.kind = kind
         state.indent_level = indent
 
