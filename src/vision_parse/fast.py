@@ -245,6 +245,26 @@ class FastMarkdown:
     # ---------- Integrated text + tables rendering ----------
 
     @staticmethod
+    def _is_bullet_point(text: str) -> bool:
+        """Return True for typical bullet markers."""
+        s = text.lstrip()
+        return s.startswith(tuple(BULLET_CHARS)) or s.startswith("- ")
+
+    @staticmethod
+    def _convert_bullet_to_markdown(text: str) -> str:
+        """Normalize any bullet to '- ' markdown bullet."""
+        s = re.sub(r"^\s*", "", text)
+        s = re.sub(f"^[{re.escape(BULLET_CHARS)}]\\s*", "- ", s)
+        if not s.startswith("- "):
+            s = "- " + s
+        return s
+
+    @staticmethod
+    def _is_numbered_list_item(text: str) -> bool:
+        """Return True if line starts with 1., 1) etc."""
+        return bool(re.match(r"^\s*\d+\s*[.)]", text))
+
+    @staticmethod
     def _rects_intersect(a: Tuple[float, float, float, float], b: Tuple[float, float, float, float]) -> bool:
         return not (a[2] <= b[0] or a[0] >= b[2] or a[3] <= b[1] or a[1] >= b[3])
 
@@ -317,8 +337,8 @@ class FastMarkdown:
         last_emitted_line: Optional[str] = None
         # New suppression trackers
         emitted_headers: set[str] = set()
-        emitted_bullet_labels: set[str] = set()
-        last_emitted_ordered_label: Optional[str] = None
+        # Per-indent list counters for ordered lists
+        list_counters: Dict[int, int] = {}
 
         # Convert links and lines into miner coordinate space once
         link_rects: List[Tuple[Tuple[float, float, float, float], str]] = [
@@ -426,54 +446,36 @@ class FastMarkdown:
                 candidate = f"{'#' * min(header_level, 3)} {text}"
                 def _norm_header(s: str) -> str:
                     return re.sub(r"\W+", " ", s).strip().lower()
-                if candidate not in emitted_headers and (
-                    not last_emitted_ordered_label or _norm_header(text) != _norm_header(last_emitted_ordered_label)
-                ):
+                if candidate not in emitted_headers:
                     markdown_lines.append(candidate)
                     last_emitted_line = candidate
                     emitted_headers.add(candidate)
                 self._reset_list_state(list_state)
-            elif is_bullet_like:
+            elif self._is_numbered_list_item(text):
                 if code_block_open:
                     markdown_lines.append("```")
                     code_block_open = False
-                # Normalize task list checkboxes if present
-                content = self._normalize_task_checkbox(_convert_bullet(text))
-                content_text = re.sub(r"^-[\s]*", "", content).strip()
-                base_label = content_text.split(":", 1)[0].strip()
-                has_desc = ":" in content_text
-                def _norm_label(s: str) -> str:
-                    return re.sub(r"\W+", " ", s).strip().lower()
-                # Decide nesting level: at least one deeper than ordered if inside ordered and not more indented already
-                nest_level = indent_level
-                if list_state.kind == "ordered" and nest_level <= list_state.indent_level:
-                    nest_level = list_state.indent_level + 1
-                # Skip duplicate label-only bullets and duplicates of the last ordered label
-                if (
-                    (not has_desc and _norm_label(base_label) in { _norm_label(lbl) for lbl in emitted_bullet_labels })
-                    or (last_emitted_ordered_label and _norm_label(base_label) == _norm_label(last_emitted_ordered_label))
-                ):
-                    pass
-                else:
-                    candidate = _indent(nest_level) + content
-                    if candidate != (last_emitted_line or ""):
-                        markdown_lines.append(candidate)
-                        last_emitted_line = candidate
-                    if has_desc:
-                        emitted_bullet_labels.add(base_label)
-                self._set_list_state(list_state, kind="unordered", indent=nest_level)
-            elif is_ordered:
-                if code_block_open:
-                    markdown_lines.append("```")
-                    code_block_open = False
-                normalized = _normalize_ordered_item(text)
-                candidate = _indent(indent_level) + normalized
+                # Reset deeper counters when indent decreases
+                for lvl in list(list_counters.keys()):
+                    if lvl > indent_level:
+                        del list_counters[lvl]
+                list_counters[indent_level] = list_counters.get(indent_level, 0) + 1
+                content = re.sub(r"^\s*\d+\s*[.)]\s*", "", text).strip()
+                candidate = _indent(indent_level) + f"{list_counters[indent_level]}. {content}"
                 if candidate != (last_emitted_line or ""):
                     markdown_lines.append(candidate)
                     last_emitted_line = candidate
-                # Track last ordered label for de-duplication
-                last_emitted_ordered_label = re.sub(r"^\s*\d+\.\s*", "", normalized).strip()
                 self._set_list_state(list_state, kind="ordered", indent=indent_level)
+            elif self._is_bullet_point(text):
+                if code_block_open:
+                    markdown_lines.append("```")
+                    code_block_open = False
+                content = self._convert_bullet_to_markdown(text)
+                candidate = _indent(indent_level) + content
+                if candidate != (last_emitted_line or ""):
+                    markdown_lines.append(candidate)
+                    last_emitted_line = candidate
+                self._set_list_state(list_state, kind="unordered", indent=indent_level)
             elif text.startswith(">") or (indent_level >= 2 and is_italicish):
                 if code_block_open:
                     markdown_lines.append("```")
@@ -483,26 +485,8 @@ class FastMarkdown:
                     markdown_lines.append(candidate)
                     last_emitted_line = candidate
                 self._reset_list_state(list_state)
-            elif list_intro_active:
-                # Treat as bullet following a list-intro ending with ':'
-                if code_block_open:
-                    markdown_lines.append("```")
-                    code_block_open = False
-                base_label = text.split(":", 1)[0].strip()
-                def _norm_label2(s: str) -> str:
-                    return re.sub(r"\W+", " ", s).strip().lower()
-                # Skip if this line is just repeating the last ordered label
-                if last_emitted_ordered_label and _norm_label2(base_label) == _norm_label2(last_emitted_ordered_label):
-                    pass
-                else:
-                    candidate = _indent(max(indent_level, list_intro_indent)) + "- " + text
-                    if candidate != (last_emitted_line or ""):
-                        markdown_lines.append(candidate)
-                        last_emitted_line = candidate
-                    emitted_bullet_labels.add(base_label)
-                self._set_list_state(
-                    list_state, kind="unordered", indent=max(indent_level, list_intro_indent)
-                )
+            elif False:
+                pass
             elif is_code_like:
                 if not code_block_open and consecutive_code_lines >= 2:
                     markdown_lines.append("```")
@@ -527,14 +511,7 @@ class FastMarkdown:
                     decorated = f"**{decorated}**"
                 elif is_italicish:
                     decorated = f"*{decorated}*"
-                # Suppress stray label-only echoes that match previously emitted bullet labels
-                def _norm_plain(s: str) -> str:
-                    return re.sub(r"\W+", " ", s).strip().lower()
-                if (
-                    _norm_plain(decorated) in { _norm_plain(lbl) for lbl in emitted_bullet_labels }
-                ):
-                    pass
-                elif decorated != (last_emitted_line or ""):
+                if decorated != (last_emitted_line or ""):
                     markdown_lines.append(decorated)
                     last_emitted_line = decorated
                 self._reset_list_state(list_state)
