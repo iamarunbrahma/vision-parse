@@ -120,7 +120,7 @@ class FastMarkdown:
             _logger.info("Loaded %d pages from %s", len(layouts), self.pdf_path.name)
 
             # Pre-extract per-page features using pdfplumber
-            page_features: List[PageFeatures] = self._preextract_page_features()
+            page_features: List[PageFeatures] = self._extract_page_features()
 
             for page_index, layout in enumerate(
                 tqdm(layouts, desc="Extracting markdown from pages")
@@ -149,7 +149,7 @@ class FastMarkdown:
             _logger.exception("Failed to extract markdown: %s", exc)
             return []
 
-    def _preextract_page_features(self) -> List[PageFeatures]:
+    def _extract_page_features(self) -> List[PageFeatures]:
         """Collect tables, hyperlinks, and horizontal vector lines per page via pdfplumber."""
         features: List[PageFeatures] = []
         try:
@@ -585,7 +585,7 @@ class FastMarkdown:
                     header_level,
                     last_emitted_line,
                 )
-            elif self._has_ordered_list_marker(text):
+            elif self._is_ordered_marker(text):
                 code_block_open, last_emitted_line = self._emit_ordered(
                     markdown_lines,
                     code_block_open,
@@ -595,7 +595,7 @@ class FastMarkdown:
                     text,
                     last_emitted_line,
                 )
-            elif self._has_bullet_marker(text):
+            elif self._is_bullet_marker(text):
                 code_block_open, last_emitted_line = self._emit_bullet(
                     markdown_lines,
                     code_block_open,
@@ -836,4 +836,7 @@ def main() -> List[str]:
 
 
 if __name__ == "__main__":
-    main()
+    res = main()
+
+    with open("res.md", "w") as f:
+        f.write("\n".join(res))
