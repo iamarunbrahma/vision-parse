@@ -7,6 +7,7 @@ SUPPORTED_MODELS: Dict[str, str] = {
     "gemini-2.5-pro": "gemini",
     "gemini-2.5-flash": "gemini",
     "gemini-2.0-flash": "gemini",
+    "unsloth/Mistral-Small-3.1-24B-Instruct-2503-bnb-4bit": "vllm",
 }
 
 

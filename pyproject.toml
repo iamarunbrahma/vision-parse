@@ -64,9 +64,13 @@ gemini = [
 openai = [
     "openai==1.59.8",
 ]
+vllm = [
+    "vllm>=0.9.2",
+]
 all = [
     "google-genai>=0.2.0",
     "openai==1.59.8",
+    "vllm>=0.9.2",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -84,3 +88,8 @@ include = [
 
 [tool.hatch.version]
 source = "vcs"
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: marks tests that exercise external services",
+]

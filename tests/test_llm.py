@@ -178,6 +178,80 @@ async def test_openai_generate_markdown(
 
 
 @pytest.mark.asyncio
+@patch("vllm.AsyncOpenAI")
+async def test_vllm_generate_markdown(
+    MockAsyncOpenAI, sample_base64_image, mock_pixmap, monkeypatch
+):
+    """Test markdown generation routed through a vLLM OpenAI-compatible endpoint."""
+
+    for env_var in [
+        "OPENAI_BASE_URL",
+        "VLLM_BASE_URL",
+        "OPENAI_API_KEY",
+        "VLLM_API_KEY",
+    ]:
+        monkeypatch.delenv(env_var, raising=False)
+
+    mock_client = AsyncMock()
+    MockAsyncOpenAI.return_value = mock_client
+
+    structured_response = MagicMock()
+    structured_response.choices = [
+        MagicMock(
+            message=MagicMock(
+                content=json.dumps(
+                    {
+                        "text_detected": "Yes",
+                        "tables_detected": "No",
+                        "images_detected": "No",
+                        "latex_equations_detected": "No",
+                        "extracted_text": "Test content",
+                        "confidence_score_text": 0.9,
+                    }
+                )
+            )
+        )
+    ]
+
+    markdown_response = MagicMock()
+    markdown_response.choices = [
+        MagicMock(message=MagicMock(content="# Test Header\n\nTest content"))
+    ]
+
+    mock_client.chat.completions.create = AsyncMock(
+        side_effect=[structured_response, markdown_response]
+    )
+    mock_client.beta.chat.completions.parse = AsyncMock()
+
+    llm = LLM(
+        model_name="unsloth/Mistral-Small-3.1-24B-Instruct-2503-bnb-4bit",
+        api_key=None,
+        temperature=0.6,
+        top_p=0.8,
+        ollama_config=None,
+        openai_config={},
+        gemini_config=None,
+        image_mode=None,
+        custom_prompt=None,
+        detailed_extraction=True,
+        enable_concurrency=True,
+        device=None,
+        num_workers=1,
+    )
+
+    result = await llm.generate_markdown(sample_base64_image, mock_pixmap, 0)
+
+    assert isinstance(result, str)
+    assert "Test content" in result
+    assert mock_client.chat.completions.create.call_count == 2
+    mock_client.beta.chat.completions.parse.assert_not_called()
+
+    call_kwargs = MockAsyncOpenAI.call_args.kwargs
+    assert call_kwargs["base_url"] == "http://localhost:8000/v1"
+    assert call_kwargs["api_key"] == "EMPTY"
+
+
+@pytest.mark.asyncio
 @patch("openai.AsyncAzureOpenAI")
 async def test_azure_openai_generate_markdown(
     MockAsyncAzureOpenAI, sample_base64_image, mock_pixmap
