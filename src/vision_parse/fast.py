@@ -3,7 +3,6 @@ import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from statistics import median
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from pdfminer.high_level import extract_pages
@@ -14,6 +13,8 @@ from tqdm import tqdm
 
 # Hardcoded configuration (no external config dependency)
 BULLET_CHARS = "•◦▪▫●○*·–—-"
+HEADER_MARGIN = 50.0
+FOOTER_MARGIN = 50.0
 _logger = logging.getLogger(__name__)
 
 
@@ -114,48 +115,9 @@ class PageFeatures:
     horizontal_lines: List[Tuple[float, float, float, float]]
 
 
-class HeaderFooterDetector:
-    """Detect and filter out headers and footers based on position and repetition."""
-    
-    def __init__(self, page_height_threshold: float = 0.1):
-        self.header_threshold = page_height_threshold  # Top 10% of page
-        self.footer_threshold = 1.0 - page_height_threshold  # Bottom 10% of page
-        self.min_pages_for_pattern = 2  # Minimum pages to consider something a header/footer
-    
-    def is_likely_header_footer(self, bbox: Tuple[float, float, float, float], 
-                               page_height: float, text: str) -> bool:
-        """Check if text position and content suggest header/footer."""
-        _, y0, _, y1 = bbox
-        y_ratio_top = (page_height - y1) / page_height  # Distance from top
-        y_ratio_bottom = y0 / page_height  # Distance from bottom
-        
-        # Check position
-        is_in_header_area = y_ratio_top <= self.header_threshold
-        is_in_footer_area = y_ratio_bottom <= self.header_threshold
-        
-        # Check content patterns (page numbers, common header/footer text)
-        text_lower = text.lower().strip()
-        is_page_number = bool(re.match(r'^\d+$', text.strip()))
-        is_common_footer = any(word in text_lower for word in ['page', 'chapter', '©', 'copyright'])
-        
-        return (is_in_header_area or is_in_footer_area) and (is_page_number or is_common_footer or len(text.strip()) < 50)
-
-
 class FontSizeAnalyzer:
-    """Simple font size analyzer for header detection."""
-
-    def estimate_body_size(self, lines: List[LTTextLine]) -> float:
-        """Estimate the median body font size for a page."""
-        sizes: List[float] = []
-        for line in lines:
-            sizes.extend(_line_font_sizes(line))
-        if not sizes:
-            return 12.0
-        return float(median(sorted(sizes)))
-    
-    def is_header_size(self, font_size: float, body_size: float) -> bool:
-        """Check if font size indicates header text (significantly larger than body)."""
-        return font_size > body_size + 2.0  # At least 2pt larger than body text
+    """Deprecated: replaced by threshold-based header level mapping."""
+    pass
 
 
  
@@ -167,8 +129,7 @@ class FastMarkdown:
     def __init__(self, pdf_path: Path) -> None:
         """Initialize extractor with a PDF path."""
         self.pdf_path = pdf_path
-        self._font_analyzer = FontSizeAnalyzer()
-        self._header_footer_detector = HeaderFooterDetector()
+        # No analyzers required; use simple threshold-based mapping
 
     def extract(self) -> List[str]:
         """Extract and return a list of markdown strings per page."""
@@ -193,14 +154,12 @@ class FastMarkdown:
                 tqdm(layouts, desc="Extracting markdown from pages")
             ):
                 lines = self._collect_text_lines(layout)
-                body_size = self._font_analyzer.estimate_body_size(lines)
                 page_height = float(layout.bbox[3])
                 pf = page_features[page_index] if page_index < len(page_features) else PageFeatures([], [], [])
                 page_tables = pf.tables
                 items = self._build_items(lines, page_tables, page_height)
                 page_md = self._build_page_markdown_from_items(
                     items,
-                    body_size,
                     page_height,
                     pf.hyperlinks,
                     pf.horizontal_lines,
@@ -334,7 +293,6 @@ class FastMarkdown:
     def _build_page_markdown_from_items(
         self,
         items: List[Dict[str, Any]],
-        body_size: float,
         page_height: float,
         page_hyperlinks: List[Dict[str, Any]],
         page_lines: List[Tuple[float, float, float, float]],
@@ -409,7 +367,6 @@ class FastMarkdown:
                     markdown_lines.append("")
 
             max_size = max(sizes) if sizes else 0.0
-            is_header_size = self._font_analyzer.is_header_size(max_size, body_size)
 
             total_chars = max(len(sizes), 1)
             bold_ratio = sum(1 for n in names if _is_bold_fontname(n)) / float(total_chars)
@@ -419,17 +376,18 @@ class FastMarkdown:
 
             word_count = len(text.split())
             ends_punct = bool(re.search(r"[.!?:]\s*$", text))
-            size_delta = float(max_size) - float(body_size)
             is_bullet_like = _is_bullet_text(text)
             is_ordered = _is_ordered_item(text)
             contains_brackets = "[" in text and ")" in text
 
-            # Skip header/footer text
-            if self._header_footer_detector.is_likely_header_footer(it["bbox"], page_height, text):
+            # Skip header/footer text using fixed margins
+            _, y0, _, y1 = it["bbox"]
+            if y0 <= FOOTER_MARGIN or (page_height - y1) <= HEADER_MARGIN:
                 continue
             
+            header_level = self._get_header_level(max_size)
             header_ok = (
-                is_header_size
+                header_level > 0
                 and not is_bullet_like
                 and not is_ordered
                 and not contains_brackets
@@ -441,9 +399,9 @@ class FastMarkdown:
             if indent_step > 0:
                 indent_level = max(0, int(round((left - base_left) / indent_step)))
 
-            # Code block heuristics
-            looks_code = self._looks_like_code(text, names)
-            if looks_code:
+            # Code block detection (generic): accumulate consecutive indented/monospace-like lines
+            is_code_like = self._is_monospace_family(names) or text.startswith("    ") or text.startswith("\t")
+            if is_code_like:
                 consecutive_code_lines += 1
             else:
                 consecutive_code_lines = 0
@@ -465,15 +423,7 @@ class FastMarkdown:
                 if code_block_open:
                     markdown_lines.append("```")
                     code_block_open = False
-                # Simple header level based on font size difference
-                size_diff = max_size - body_size
-                if size_diff >= 6.0:
-                    hlevel = 1
-                elif size_diff >= 4.0:
-                    hlevel = 2
-                else:
-                    hlevel = 3
-                candidate = f"{'#' * hlevel} {text}"
+                candidate = f"{'#' * min(header_level, 3)} {text}"
                 def _norm_header(s: str) -> str:
                     return re.sub(r"\W+", " ", s).strip().lower()
                 if candidate not in emitted_headers and (
@@ -553,7 +503,7 @@ class FastMarkdown:
                 self._set_list_state(
                     list_state, kind="unordered", indent=max(indent_level, list_intro_indent)
                 )
-            elif looks_code:
+            elif is_code_like:
                 if not code_block_open and consecutive_code_lines >= 2:
                     markdown_lines.append("```")
                     code_block_open = True
@@ -606,6 +556,23 @@ class FastMarkdown:
         return "\n".join(markdown_lines) + "\n"
 
     @staticmethod
+    def _get_header_level(font_size: float) -> int:
+        """Determine header level based on absolute font size thresholds."""
+        if font_size > 24:
+            return 1
+        if font_size > 20:
+            return 2
+        if font_size > 18:
+            return 3
+        if font_size > 16:
+            return 4
+        if font_size > 14:
+            return 5
+        if font_size > 12:
+            return 6
+        return 0
+
+    @staticmethod
     def _auto_linkify(text: str) -> str:
         url_pattern = re.compile(r"(https?://[^\s)]+)")
         def repl(match: re.Match[str]) -> str:
@@ -621,17 +588,7 @@ class FastMarkdown:
             for n in lowers
         )
 
-    def _looks_like_code(self, text: str, fontnames: List[str]) -> bool:
-        """Simple code detection based on monospace fonts and indentation."""
-        # Primary indicator: monospace font
-        if self._is_monospace_family(fontnames):
-            return True
-        
-        # Secondary indicator: significant indentation (4+ spaces)
-        if text.startswith('    ') or text.startswith('\t'):
-            return True
-            
-        return False
+    # Removed _looks_like_code(): generic detection is handled inline
 
     @staticmethod
     def _table_to_markdown(table: List[List[Optional[str]]]) -> str:
