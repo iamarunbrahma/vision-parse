@@ -11,14 +11,16 @@ import pdfplumber
 from tqdm import tqdm
 
 
-# Hardcoded configuration (no external config dependency)
+# Static configuration constants
 BULLET_CHARS = "•◦▪▫●○*·–—-"
+LIST_INDENT_PX = 24.0
 HEADER_MARGIN = 50.0
 FOOTER_MARGIN = 50.0
 _logger = logging.getLogger(__name__)
 
 
-def _clean_text(text: str) -> str:
+def _norm_ws(text: str) -> str:
+    """Normalize whitespace by collapsing runs and trimming edges."""
     text = text.strip()
     text = re.sub(r"\s+", " ", text)
     return text
@@ -33,67 +35,47 @@ def _indent(level: int) -> str:
     return " " * (3 * lvl)
 
 
-def _is_bullet_text(text: str) -> bool:
+def _is_bullet(text: str) -> bool:
+    """True if the text line begins with a bullet-like Unicode character."""
     return text.strip().startswith(tuple(BULLET_CHARS))
 
 
-def _convert_bullet(text: str) -> str:
-    text = re.sub(r"^\s*", "", text)
-    return re.sub(f"^[{re.escape(BULLET_CHARS)}]\\s*", "- ", text)
-
-
-def _is_ordered_item(text: str) -> bool:
+def _is_ordered(text: str) -> bool:
+    """True if the text line begins with an ordered-list marker like '1.' or '1)'"""
     return bool(re.match(r"^\d+\s{0,3}[.)]", text.strip()))
 
 
-def _normalize_ordered_item(text: str) -> str:
-    text = re.sub(r"^\s*", "", text)
-    # Collapse double ordinals like '1. 1. Foo' -> '1. Foo'
-    text = re.sub(r"^(\d+)\s*[.)]\s+(\1)\s*[.)]\s*", r"\1. ", text)
-    return re.sub(r"^(\d+)\s*[.)]\s*", r"\1. ", text)
-
-
-def _is_horizontal_rule(text: str) -> bool:
+def _is_hr(text: str) -> bool:
+    """True if the text consists of a Markdown horizontal rule pattern."""
     s = text.strip()
-    return bool(
-        re.match(r"^[-_]{3,}$", s) or s == "***" or s == "___"
-    )
-
-
-def _estimate_indent_step(positions: List[float]) -> float:
-    if not positions:
-        return 18.0
-    uniq = sorted({round(p, 1) for p in positions})
-    diffs = [uniq[i + 1] - uniq[i] for i in range(len(uniq) - 1)]
-    diffs = [d for d in diffs if d > 1.0]
-    if not diffs:
-        return 18.0
-    diffs.sort()
-    mid = len(diffs) // 2
-    step = diffs[mid] if len(diffs) % 2 == 1 else (diffs[mid - 1] + diffs[mid]) / 2.0
-    return max(8.0, min(36.0, step))
+    return bool(re.match(r"^[-_]{3,}$", s) or s == "***" or s == "___")
 
 
 def _iter_chars(line: LTTextLine) -> Iterable[LTChar]:
+    """Yield all LTChar objects contained in a pdfminer LTTextLine."""
     for obj in line:
         if isinstance(obj, LTChar):
             yield obj
 
 
-def _line_font_sizes(line: LTTextLine) -> List[float]:
+def _font_sizes(line: LTTextLine) -> List[float]:
+    """Collect numeric font sizes for all characters in a line."""
     return [float(ch.size) for ch in _iter_chars(line)]
 
 
-def _line_fontnames(line: LTTextLine) -> List[str]:
+def _font_names(line: LTTextLine) -> List[str]:
+    """Collect font family names for all characters in a line."""
     return [str(ch.fontname or "") for ch in _iter_chars(line)]
 
 
-def _is_bold_fontname(name: str) -> bool:
+def _is_bold_font(name: str) -> bool:
+    """Heuristic to detect bold fonts from a font name string."""
     name_low = name.lower()
     return any(mark in name_low for mark in ("bold", "black", "heavy"))
 
 
-def _is_italic_fontname(name: str) -> bool:
+def _is_italic_font(name: str) -> bool:
+    """Heuristic to detect italic fonts from a font name string."""
     name_low = name.lower()
     return any(mark in name_low for mark in ("italic", "oblique"))
 
@@ -103,6 +85,7 @@ class ListState(BaseModel):
 
     kind: str = "none"  # 'none' | 'ordered' | 'unordered'
     indent_level: int = 0
+    anchor_left: Optional[float] = None
 
 
 class PageFeatures(BaseModel):
@@ -113,22 +96,15 @@ class PageFeatures(BaseModel):
     horizontal_lines: List[Tuple[float, float, float, float]]
 
 
- 
-
-
- 
-
-
 class FastMarkdown:
-    """Extract per-page markdown using pdfminer.six (text) and pdfplumber (tables)."""
+    """Fast non-LLM Markdown extractor using pdfminer (text) and pdfplumber (tables)."""
 
     def __init__(self, pdf_path: Path) -> None:
-        """Initialize extractor with a PDF path."""
+        """Initialize with the input PDF path."""
         self.pdf_path = pdf_path
-        # No analyzers required; use simple threshold-based mapping
 
     def extract(self) -> List[str]:
-        """Extract and return a list of markdown strings per page."""
+        """Return Markdown per page using the fast extraction pipeline."""
         try:
             pages_md: List[str] = []
             params = LAParams(
@@ -149,16 +125,20 @@ class FastMarkdown:
             for page_index, layout in enumerate(
                 tqdm(layouts, desc="Extracting markdown from pages")
             ):
-                lines = self._collect_text_lines(layout)
+                text_lines = self._collect_text_lines(layout)
                 page_height = float(layout.bbox[3])
-                pf = page_features[page_index] if page_index < len(page_features) else PageFeatures([], [], [])
-                page_tables = pf.tables
-                items = self._build_items(lines, page_tables, page_height)
-                page_md = self._build_page_markdown_from_items(
-                    items,
+                features_for_page = (
+                    page_features[page_index]
+                    if page_index < len(page_features)
+                    else PageFeatures([], [], [])
+                )
+                page_tables = features_for_page.tables
+                page_items = self._collect_items(text_lines, page_tables, page_height)
+                page_md = self._render_page(
+                    page_items,
                     page_height,
-                    pf.hyperlinks,
-                    pf.horizontal_lines,
+                    features_for_page.hyperlinks,
+                    features_for_page.horizontal_lines,
                 )
                 page_md = self._post_process(page_md)
                 pages_md.append(page_md)
@@ -170,7 +150,7 @@ class FastMarkdown:
             return []
 
     def _preextract_page_features(self) -> List[PageFeatures]:
-        """Collect tables, hyperlinks, and line segments per page via pdfplumber."""
+        """Collect tables, hyperlinks, and horizontal vector lines per page via pdfplumber."""
         features: List[PageFeatures] = []
         try:
             with pdfplumber.open(str(self.pdf_path)) as plumber_pdf:
@@ -197,7 +177,9 @@ class FastMarkdown:
                             x1 = float(link.get("x1"))
                             top = float(link.get("top"))
                             bottom = float(link.get("bottom"))
-                            page_links.append({"bbox": (x0, top, x1, bottom), "uri": uri})
+                            page_links.append(
+                                {"bbox": (x0, top, x1, bottom), "uri": uri}
+                            )
                         except Exception:
                             continue
 
@@ -228,26 +210,27 @@ class FastMarkdown:
     # ---------- Page processing helpers ----------
 
     def _collect_text_lines(self, layout: Any) -> List[LTTextLine]:
-        lines: List[LTTextLine] = []
+        """Return all text lines in a layout, sorted in visual reading order."""
+        text_lines: List[LTTextLine] = []
         for element in layout:
             if isinstance(element, LTTextContainer):
                 for line in element:
                     if isinstance(line, LTTextLine):
-                        lines.append(line)
+                        text_lines.append(line)
         # Sort by (y1 desc, x0 asc) for visual reading order
-        lines.sort(key=lambda ln: (-ln.bbox[3], ln.bbox[0]))
-        return lines
+        text_lines.sort(key=lambda line_obj: (-line_obj.bbox[3], line_obj.bbox[0]))
+        return text_lines
 
     # ---------- Integrated text + tables rendering ----------
 
     @staticmethod
-    def _is_bullet_point(text: str) -> bool:
-        """Return True for typical bullet markers."""
+    def _is_bullet_marker(text: str) -> bool:
+        """Return True for typical bullet markers at the start of a line."""
         s = text.lstrip()
         return s.startswith(tuple(BULLET_CHARS)) or s.startswith("- ")
 
     @staticmethod
-    def _convert_bullet_to_markdown(text: str) -> str:
+    def _normalize_bullet_to_md(text: str) -> str:
         """Normalize any bullet to '- ' markdown bullet."""
         s = re.sub(r"^\s*", "", text)
         s = re.sub(f"^[{re.escape(BULLET_CHARS)}]\\s*", "- ", s)
@@ -256,45 +239,59 @@ class FastMarkdown:
         return s
 
     @staticmethod
-    def _is_numbered_list_item(text: str) -> bool:
+    def _is_ordered_marker(text: str) -> bool:
         """Return True if line starts with 1., 1) etc."""
         return bool(re.match(r"^\s*\d+\s*[.)]", text))
 
     @staticmethod
-    def _rects_intersect(a: Tuple[float, float, float, float], b: Tuple[float, float, float, float]) -> bool:
+    def _rects_overlap(
+        a: Tuple[float, float, float, float], b: Tuple[float, float, float, float]
+    ) -> bool:
+        """True if two rectangles overlap (inclusive)."""
         return not (a[2] <= b[0] or a[0] >= b[2] or a[3] <= b[1] or a[1] >= b[3])
 
     @staticmethod
-    def _convert_plumber_bbox_to_miner(bbox: Tuple[float, float, float, float], page_height: float) -> Tuple[float, float, float, float]:
+    def _plumber_to_miner_bbox(
+        bbox: Tuple[float, float, float, float], page_height: float
+    ) -> Tuple[float, float, float, float]:
         x0, top, x1, bottom = bbox
         y0 = page_height - bottom
         y1 = page_height - top
         return (float(x0), float(y0), float(x1), float(y1))
 
-    def _build_items(
+    def _collect_items(
         self,
         lines: List[LTTextLine],
         page_tables: List[Dict[str, Any]],
         page_height: float,
     ) -> List[Dict[str, Any]]:
-        items: List[Dict[str, Any]] = []
-        converted_tables: List[Dict[str, Any]] = []
-        for tb in page_tables:
-            miner_bbox = self._convert_plumber_bbox_to_miner(tb["bbox"], page_height)
-            converted_tables.append({"type": "table", "bbox": miner_bbox, "data": tb["content"]})
+        """Merge text lines and tables into a single reading-ordered item stream."""
+        page_items: List[Dict[str, Any]] = []
+        table_items: List[Dict[str, Any]] = []
+        for table_info in page_tables:
+            miner_bbox = self._plumber_to_miner_bbox(table_info["bbox"], page_height)
+            table_items.append(
+                {
+                    "type": "table",
+                    "bbox": miner_bbox,
+                    "data": table_info["content"],
+                }
+            )
 
-        table_bboxes = [it["bbox"] for it in converted_tables]
-        for ln in lines:
-            bbox = tuple(float(v) for v in ln.bbox)
-            if any(self._rects_intersect(bbox, tb) for tb in table_bboxes):
+        table_bboxes = [item["bbox"] for item in table_items]
+        for text_line in lines:
+            text_bbox = tuple(float(v) for v in text_line.bbox)
+            if any(self._rects_overlap(text_bbox, tb) for tb in table_bboxes):
                 continue
-            items.append({"type": "text", "bbox": bbox, "data": ln})
+            page_items.append({"type": "text", "bbox": text_bbox, "data": text_line})
 
-        items.extend(converted_tables)
-        return self._sort_items_by_reading_order(items, page_height)
+        page_items.extend(table_items)
+        return self._sort_reading_order(page_items, page_height)
 
     @staticmethod
-    def _sort_items_by_reading_order(items: List[Dict[str, Any]], page_height: float) -> List[Dict[str, Any]]:
+    def _sort_reading_order(
+        items: List[Dict[str, Any]], page_height: float
+    ) -> List[Dict[str, Any]]:
         if not items:
             return []
 
@@ -306,103 +303,244 @@ class FastMarkdown:
 
         return sorted(items, key=key_func)
 
-    def _build_page_markdown_from_items(
+    # ---------- Rendering helpers (single-responsibility) ----------
+
+    @staticmethod
+    def _compute_list_level(list_state: ListState, left: float) -> int:
+        """Compute nesting level from geometry using a fixed indent bin size."""
+        if list_state.anchor_left is None:
+            list_state.anchor_left = left
+        return max(0, int((left - (list_state.anchor_left or left)) / LIST_INDENT_PX))
+
+    # (unused text decoration helper removed)
+
+    # ---------- Per-line handlers ----------
+
+    # (unused table handler removed)
+
+    # (unused header-line checker removed)
+
+    def _emit_header(
+        self,
+        markdown_lines: List[str],
+        code_block_open: bool,
+        list_state: ListState,
+        emitted_headers: set,
+        text: str,
+        header_level: int,
+        last_emitted_line: Optional[str],
+    ) -> Tuple[bool, Optional[str]]:
+        """Emit a header line (clamped to H1–H3) and reset list state."""
+        if code_block_open:
+            markdown_lines.append("```")
+            code_block_open = False
+        candidate = f"{'#' * min(header_level, 3)} {text}"
+        if candidate not in emitted_headers:
+            markdown_lines.append(candidate)
+            last_emitted_line = candidate
+            emitted_headers.add(candidate)
+        self._reset_list_state(list_state)
+        return code_block_open, last_emitted_line
+
+    def _emit_ordered(
+        self,
+        markdown_lines: List[str],
+        code_block_open: bool,
+        list_state: ListState,
+        list_counters: Dict[int, int],
+        left: float,
+        text_raw: str,
+        last_emitted_line: Optional[str],
+    ) -> Tuple[bool, Optional[str]]:
+        """Emit an ordered list line with geometry-based nesting and counters."""
+        if code_block_open:
+            markdown_lines.append("```")
+            code_block_open = False
+        if list_state.kind != "ordered" or list_state.anchor_left is None:
+            list_state.anchor_left = left
+        indent_level = self._compute_list_level(list_state, left)
+        for lvl in list(list_counters.keys()):
+            if lvl > indent_level:
+                del list_counters[lvl]
+        list_counters[indent_level] = list_counters.get(indent_level, 0) + 1
+        content = re.sub(r"^\s*\d+\s*[.)]\s*", "", text_raw).strip()
+        candidate = _indent(indent_level) + f"{list_counters[indent_level]}. {content}"
+        if candidate != (last_emitted_line or ""):
+            markdown_lines.append(candidate)
+            last_emitted_line = candidate
+        self._set_list_state(list_state, kind="ordered", indent=indent_level)
+        return code_block_open, last_emitted_line
+
+    def _emit_bullet(
+        self,
+        markdown_lines: List[str],
+        code_block_open: bool,
+        list_state: ListState,
+        left: float,
+        text_raw: str,
+        last_emitted_line: Optional[str],
+    ) -> Tuple[bool, Optional[str]]:
+        """Emit a bullet list line with geometry-based nesting and normalized bullet."""
+        if code_block_open:
+            markdown_lines.append("```")
+            code_block_open = False
+        if list_state.kind != "unordered" or list_state.anchor_left is None:
+            list_state.anchor_left = left
+        indent_level = self._compute_list_level(list_state, left)
+        content = self._normalize_bullet_to_md(text_raw)
+        candidate = _indent(indent_level) + content
+        if candidate != (last_emitted_line or ""):
+            markdown_lines.append(candidate)
+            last_emitted_line = candidate
+        self._set_list_state(list_state, kind="unordered", indent=indent_level)
+        return code_block_open, last_emitted_line
+
+    def _emit_blockquote(
+        self,
+        markdown_lines: List[str],
+        code_block_open: bool,
+        list_state: ListState,
+        text: str,
+        last_emitted_line: Optional[str],
+    ) -> Tuple[bool, Optional[str]]:
+        """Emit a blockquote line and close any open code block."""
+        if code_block_open:
+            markdown_lines.append("```")
+            code_block_open = False
+        candidate = ("> " + text) if not text.startswith(">") else text
+        if candidate != (last_emitted_line or ""):
+            markdown_lines.append(candidate)
+            last_emitted_line = candidate
+        self._reset_list_state(list_state)
+        return code_block_open, last_emitted_line
+
+    def _emit_code(
+        self,
+        markdown_lines: List[str],
+        code_block_open: bool,
+        consecutive_code_lines: int,
+        is_code_like: bool,
+        text_raw: str,
+        text: str,
+        last_emitted_line: Optional[str],
+    ) -> Tuple[bool, int, Optional[str]]:
+        """Emit inline or fenced code depending on consecutive code-like lines."""
+        if is_code_like and not code_block_open and consecutive_code_lines >= 2:
+            markdown_lines.append("```")
+            code_block_open = True
+        if code_block_open:
+            candidate = text_raw.strip()
+            if candidate != (last_emitted_line or ""):
+                markdown_lines.append(candidate)
+                last_emitted_line = candidate
+        else:
+            candidate = f"`{text}`"
+            if candidate != (last_emitted_line or ""):
+                markdown_lines.append(candidate)
+                last_emitted_line = candidate
+        self._reset_list_state(ListState())
+        return code_block_open, consecutive_code_lines, last_emitted_line
+
+    def _render_page(
         self,
         items: List[Dict[str, Any]],
         page_height: float,
         page_hyperlinks: List[Dict[str, Any]],
         page_lines: List[Tuple[float, float, float, float]],
     ) -> str:
+        """Render a page's items (text/tables) into Markdown lines."""
         if not items:
             return ""
-
-        # Indentation baseline from all text items
-        line_lefts = [it["bbox"][0] for it in items if it["type"] == "text"]
-        base_left = min(line_lefts) if line_lefts else 0.0
-        indent_step = _estimate_indent_step(line_lefts)
 
         markdown_lines: List[str] = []
         list_state = ListState()
         last_y1: Optional[float] = None
-        last_sizes: List[float] = []
-        prev_plain = ""
+        last_line_font_sizes: List[float] = []
+        prev_line_text = ""
         code_block_open = False
         consecutive_code_lines = 0
-        list_intro_active = False
-        list_intro_indent = 0
         last_emitted_line: Optional[str] = None
-        # New suppression trackers
         emitted_headers: set[str] = set()
-        # Per-indent list counters for ordered lists
         list_counters: Dict[int, int] = {}
 
-        # Convert links and lines into miner coordinate space once
         link_rects: List[Tuple[Tuple[float, float, float, float], str]] = [
-            (self._convert_plumber_bbox_to_miner(lk["bbox"], page_height), lk["uri"])
+            (self._plumber_to_miner_bbox(lk["bbox"], page_height), lk["uri"])
             for lk in page_hyperlinks
             if isinstance(lk, dict) and "bbox" in lk and "uri" in lk
         ]
         line_rects_miner: List[Tuple[float, float, float, float]] = [
-            self._convert_plumber_bbox_to_miner(b, page_height) for b in page_lines
+            self._plumber_to_miner_bbox(b, page_height) for b in page_lines
         ]
 
-        for it in items:
-            if it["type"] == "table":
+        for item in items:
+            if item["type"] == "table":
                 # Close code block if open
                 if code_block_open:
                     markdown_lines.append("```")
                     code_block_open = False
                 markdown_lines.append("")
-                markdown_lines.append(self._table_to_markdown(it["data"]))
+                markdown_lines.append(self._table_to_markdown(item["data"]))
                 markdown_lines.append("")
                 self._reset_list_state(list_state)
                 continue
 
             # Text line processing
-            line: LTTextLine = it["data"]
-            left, _, _, y1 = it["bbox"]
-            sizes = _line_font_sizes(line)
-            names = _line_fontnames(line)
-            text_raw = (line.get_text() or "").replace("\n", " ")
-            text = _clean_text(text_raw)
+            text_line: LTTextLine = item["data"]
+            left, _, _, y1 = item["bbox"]
+            font_sizes = _font_sizes(text_line)
+            font_names = _font_names(text_line)
+            text_raw = (text_line.get_text() or "").replace("\n", " ")
+            text = _norm_ws(text_raw)
 
             if not text:
-                prev_plain = text
+                prev_line_text = text
                 last_y1 = y1
-                last_sizes = sizes
+                last_line_font_sizes = font_sizes
                 continue
 
             # Paragraph break heuristic
             if last_y1 is not None:
-                avg_last = sum(last_sizes) / len(last_sizes) if last_sizes else 0.0
-                avg_curr = sum(sizes) / len(sizes) if sizes else 0.0
+                avg_last = (
+                    sum(last_line_font_sizes) / len(last_line_font_sizes)
+                    if last_line_font_sizes
+                    else 0.0
+                )
+                avg_curr = sum(font_sizes) / len(font_sizes) if font_sizes else 0.0
                 y_gap = abs(y1 - last_y1)
                 font_changed = abs(avg_curr - avg_last) > 1.0
-                prev_end_sentence = bool(re.search(r"[.!?]\s*$", prev_plain or ""))
-                if (y_gap > 2.0 or font_changed) and prev_end_sentence and not code_block_open:
+                prev_end_sentence = bool(re.search(r"[.!?]\s*$", prev_line_text or ""))
+                if (
+                    (y_gap > 2.0 or font_changed)
+                    and prev_end_sentence
+                    and not code_block_open
+                ):
                     markdown_lines.append("")
 
-            max_size = max(sizes) if sizes else 0.0
+            max_size = max(font_sizes) if font_sizes else 0.0
 
-            total_chars = max(len(sizes), 1)
-            bold_ratio = sum(1 for n in names if _is_bold_fontname(n)) / float(total_chars)
-            italic_ratio = sum(1 for n in names if _is_italic_fontname(n)) / float(total_chars)
+            total_chars = max(len(font_sizes), 1)
+            bold_ratio = sum(1 for n in font_names if _is_bold_font(n)) / float(
+                total_chars
+            )
+            italic_ratio = sum(1 for n in font_names if _is_italic_font(n)) / float(
+                total_chars
+            )
             is_boldish = bold_ratio > 0.3
             is_italicish = italic_ratio > 0.3
 
             word_count = len(text.split())
             ends_punct = bool(re.search(r"[.!?:]\s*$", text))
-            is_bullet_like = _is_bullet_text(text)
-            is_ordered = _is_ordered_item(text)
+            is_bullet_like = _is_bullet(text)
+            is_ordered = _is_ordered(text)
             contains_brackets = "[" in text and ")" in text
 
             # Skip header/footer text using fixed margins
-            _, y0, _, y1 = it["bbox"]
+            _, y0, _, y1 = item["bbox"]
             if y0 <= FOOTER_MARGIN or (page_height - y1) <= HEADER_MARGIN:
                 continue
-            
+
             header_level = self._get_header_level(max_size)
-            header_ok = (
+            is_valid_header_line = (
                 header_level > 0
                 and not is_bullet_like
                 and not is_ordered
@@ -411,94 +549,78 @@ class FastMarkdown:
                 and word_count <= 12
             )
 
-            indent_level = 0
-            if indent_step > 0:
-                indent_level = max(0, int(round((left - base_left) / indent_step)))
+            # List nesting level computed per item when needed
 
             # Code block detection (generic): accumulate consecutive indented/monospace-like lines
-            is_code_like = self._is_monospace_family(names) or text.startswith("    ") or text.startswith("\t")
+            is_code_like = (
+                self._is_monospace_family(font_names)
+                or text.startswith("    ")
+                or text.startswith("\t")
+            )
             if is_code_like:
                 consecutive_code_lines += 1
             else:
                 consecutive_code_lines = 0
 
             # Apply hyperlink mapping (wrap the whole line if intersects any link rect)
-            text = self._apply_links_to_text(text, it["bbox"], link_rects)
+            text = self._apply_links_to_text(text, item["bbox"], link_rects)
 
             # Strikethrough detection via horizontal lines crossing the text bbox midline
-            if self._has_strikethrough(it["bbox"], line_rects_miner):
+            if self._text_bbox_has_strikethrough(item["bbox"], line_rects_miner):
                 text = f"~~{text}~~"
 
-            if _is_horizontal_rule(text):
+            if _is_hr(text):
                 if code_block_open:
                     markdown_lines.append("```")
                     code_block_open = False
                 markdown_lines.append("---")
                 self._reset_list_state(list_state)
-            elif header_ok:
-                if code_block_open:
-                    markdown_lines.append("```")
-                    code_block_open = False
-                candidate = f"{'#' * min(header_level, 3)} {text}"
-                def _norm_header(s: str) -> str:
-                    return re.sub(r"\W+", " ", s).strip().lower()
-                if candidate not in emitted_headers:
-                    markdown_lines.append(candidate)
-                    last_emitted_line = candidate
-                    emitted_headers.add(candidate)
-                self._reset_list_state(list_state)
-            elif self._is_numbered_list_item(text):
-                if code_block_open:
-                    markdown_lines.append("```")
-                    code_block_open = False
-                # Reset deeper counters when indent decreases
-                for lvl in list(list_counters.keys()):
-                    if lvl > indent_level:
-                        del list_counters[lvl]
-                list_counters[indent_level] = list_counters.get(indent_level, 0) + 1
-                content = re.sub(r"^\s*\d+\s*[.)]\s*", "", text).strip()
-                candidate = _indent(indent_level) + f"{list_counters[indent_level]}. {content}"
-                if candidate != (last_emitted_line or ""):
-                    markdown_lines.append(candidate)
-                    last_emitted_line = candidate
-                self._set_list_state(list_state, kind="ordered", indent=indent_level)
-            elif self._is_bullet_point(text):
-                if code_block_open:
-                    markdown_lines.append("```")
-                    code_block_open = False
-                content = self._convert_bullet_to_markdown(text)
-                candidate = _indent(indent_level) + content
-                if candidate != (last_emitted_line or ""):
-                    markdown_lines.append(candidate)
-                    last_emitted_line = candidate
-                self._set_list_state(list_state, kind="unordered", indent=indent_level)
-            elif text.startswith(">") or (indent_level >= 2 and is_italicish):
-                if code_block_open:
-                    markdown_lines.append("```")
-                    code_block_open = False
-                candidate = ("> " + text) if not text.startswith(">") else text
-                if candidate != (last_emitted_line or ""):
-                    markdown_lines.append(candidate)
-                    last_emitted_line = candidate
-                self._reset_list_state(list_state)
-            elif False:
-                pass
+            elif is_valid_header_line:
+                code_block_open, last_emitted_line = self._emit_header(
+                    markdown_lines,
+                    code_block_open,
+                    list_state,
+                    emitted_headers,
+                    text,
+                    header_level,
+                    last_emitted_line,
+                )
+            elif self._has_ordered_list_marker(text):
+                code_block_open, last_emitted_line = self._emit_ordered(
+                    markdown_lines,
+                    code_block_open,
+                    list_state,
+                    list_counters,
+                    left,
+                    text,
+                    last_emitted_line,
+                )
+            elif self._has_bullet_marker(text):
+                code_block_open, last_emitted_line = self._emit_bullet(
+                    markdown_lines,
+                    code_block_open,
+                    list_state,
+                    left,
+                    text,
+                    last_emitted_line,
+                )
+            elif text.startswith(">"):
+                code_block_open, last_emitted_line = self._emit_blockquote(
+                    markdown_lines, code_block_open, list_state, text, last_emitted_line
+                )
+            # No-op branch removed
             elif is_code_like:
-                if not code_block_open and consecutive_code_lines >= 2:
-                    markdown_lines.append("```")
-                    code_block_open = True
-                if code_block_open:
-                    candidate = text_raw.strip()
-                    if candidate != (last_emitted_line or ""):
-                        markdown_lines.append(candidate)
-                        last_emitted_line = candidate
-                else:
-                    # Single code-like line: inline fence
-                    candidate = f"`{text}`"
-                    if candidate != (last_emitted_line or ""):
-                        markdown_lines.append(candidate)
-                        last_emitted_line = candidate
-                self._reset_list_state(list_state)
+                code_block_open, consecutive_code_lines, last_emitted_line = (
+                    self._emit_code(
+                        markdown_lines,
+                        code_block_open,
+                        consecutive_code_lines,
+                        is_code_like,
+                        text_raw,
+                        text,
+                        last_emitted_line,
+                    )
+                )
             else:
                 decorated = self._auto_linkify(text)
                 if is_boldish and is_italicish:
@@ -512,16 +634,9 @@ class FastMarkdown:
                     last_emitted_line = decorated
                 self._reset_list_state(list_state)
 
-            # Manage list-intro activation
-            if text.endswith(":") and not is_bullet_like and not is_ordered and not header_ok:
-                list_intro_active = True
-                list_intro_indent = indent_level
-            elif text == "":
-                list_intro_active = False
-
-            prev_plain = text
+            prev_line_text = text
             last_y1 = y1
-            last_sizes = sizes
+            last_line_font_sizes = font_sizes
 
         if code_block_open:
             markdown_lines.append("```")
@@ -530,7 +645,7 @@ class FastMarkdown:
 
     @staticmethod
     def _get_header_level(font_size: float) -> int:
-        """Determine header level based on absolute font size thresholds."""
+        """Map font size to a Markdown header level (H1–H6)."""
         if font_size > 24:
             return 1
         if font_size > 20:
@@ -548,10 +663,7 @@ class FastMarkdown:
     @staticmethod
     def _auto_linkify(text: str) -> str:
         url_pattern = re.compile(r"(https?://[^\s)]+)")
-        def repl(match: re.Match[str]) -> str:
-            url = match.group(1)
-            return f"[{url}]({url})"
-        return url_pattern.sub(repl, text)
+        return url_pattern.sub(lambda m: f"[{m.group(1)}]({m.group(1)})", text)
 
     @staticmethod
     def _is_monospace_family(fontnames: List[str]) -> bool:
@@ -570,9 +682,7 @@ class FastMarkdown:
         try:
             norm = [
                 [
-                    ""
-                    if cell is None
-                    else FastMarkdown._normalize_cell_text(str(cell))
+                    "" if cell is None else FastMarkdown._normalize_cell_text(str(cell))
                     for cell in row
                 ]
                 for row in table
@@ -582,7 +692,7 @@ class FastMarkdown:
             col_widths = [max(len(cell) for cell in col) for col in zip(*norm)]
             md_lines: List[str] = []
             for i, row in enumerate(norm):
-                # Bold header row cells for readability
+                # Bold header row cells
                 render_row = [
                     (f"**{cell}**" if i == 0 and cell else cell) for cell in row
                 ]
@@ -592,52 +702,55 @@ class FastMarkdown:
                 ]
                 md_lines.append("| " + " | ".join(formatted) + " |")
                 if i == 0:
-                    md_lines.append("|" + "|".join(["-" * (w + 2) for w in col_widths]) + "|")
+                    md_lines.append(
+                        "|" + "|".join(["-" * (w + 2) for w in col_widths]) + "|"
+                    )
             return "\n".join(md_lines)
         except Exception:
             return ""
 
     @staticmethod
     def _normalize_cell_text(text: str) -> str:
-        """Normalize PDF extraction artifacts in table cells."""
+        """Normalize common PDF artifacts and whitespace inside table cells."""
         if not text:
             return ""
-        
+
         # Collapse excessive whitespace and newlines
-        cleaned = re.sub(r'\s+', ' ', text.strip())
-        
+        cleaned = re.sub(r"\s+", " ", text.strip())
+
         # Remove common PDF artifacts like zero-width characters
-        cleaned = re.sub(r'[\u200b-\u200d\ufeff]', '', cleaned)
-        
+        cleaned = re.sub(r"[\u200b-\u200d\ufeff]", "", cleaned)
+
         # Fix common encoding issues
-        cleaned = cleaned.replace('\ufeff', '')  # BOM
-        cleaned = cleaned.replace('\u00a0', ' ')  # Non-breaking space
-        
+        cleaned = cleaned.replace("\ufeff", "")  # BOM
+        cleaned = cleaned.replace("\u00a0", " ")  # Non-breaking space
+
         return cleaned
 
     @staticmethod
-    def _normalize_task_checkbox(text: str) -> str:
-        # Normalize variations like [x], [X], [✓], [✔] into markdown task list
-        text = re.sub(r"^-\s*\[(x|X|✓|✔)\]\s*", "- [x] ", text)
-        text = re.sub(r"^-\s*\[\s*\]\s*", "- [ ] ", text)
-        return text
+    # (unused task checkbox normalizer removed)
 
     @staticmethod
-    def _bbox_midline(b: Tuple[float, float, float, float]) -> Tuple[float, float, float, float]:
+    def _bbox_midline(
+        b: Tuple[float, float, float, float],
+    ) -> Tuple[float, float, float, float]:
+        """Return the midline segment for a bbox as (x0, ym, x1, ym)."""
         x0, y0, x1, y1 = b
         y = (y0 + y1) / 2.0
         return (x0, y, x1, y)
 
-    def _has_strikethrough(
-        self, text_bbox: Tuple[float, float, float, float], line_rects: List[Tuple[float, float, float, float]]
+    def _text_bbox_has_strikethrough(
+        self,
+        text_bbox: Tuple[float, float, float, float],
+        line_rects: List[Tuple[float, float, float, float]],
     ) -> bool:
+        """Detect strikethrough by checking horizontal lines crossing text midline."""
         x0, y0, x1, y1 = text_bbox
-        mid = self._bbox_midline(text_bbox)
-        # Consider any line whose vertical span overlaps the midline of text and horizontally overlaps
         for lx0, ly0, lx1, ly1 in line_rects:
-            # Convert line bbox to a flat horizontal segment approximation
             ly_mid = (ly0 + ly1) / 2.0
-            if (min(x1, lx1) - max(x0, lx0)) > 4.0 and abs(ly_mid - ((y0 + y1) / 2.0)) <= 2.0:
+            if (min(x1, lx1) - max(x0, lx0)) > 4.0 and abs(
+                ly_mid - ((y0 + y1) / 2.0)
+            ) <= 2.0:
                 return True
         return False
 
@@ -647,6 +760,7 @@ class FastMarkdown:
         bbox: Tuple[float, float, float, float],
         link_rects: List[Tuple[Tuple[float, float, float, float], str]],
     ) -> str:
+        """Wrap the whole line in a link if its bbox intersects a link rect."""
         for rect, uri in link_rects:
             x0, y0, x1, y1 = bbox
             if not (x1 <= rect[0] or x0 >= rect[2] or y1 <= rect[1] or y0 >= rect[3]):
@@ -655,7 +769,6 @@ class FastMarkdown:
                 if clean:
                     return f"[{clean}]({uri})"
         return text
-
 
     @staticmethod
     def _reset_list_state(state: ListState) -> None:
@@ -671,12 +784,12 @@ class FastMarkdown:
 
     @staticmethod
     def _post_process(content: str) -> str:
-        """Basic whitespace cleanup."""
+        """Cleanup whitespace while preserving indentation and hrules."""
         try:
             # Collapse excessive newlines
             content = re.sub(r"\n{3,}", "\n\n", content)
             content = re.sub(r"^\n", "", content)
-            
+
             # Collapse excessive spaces but preserve leading indentation
             lines = content.split("\n")
             processed: List[str] = []
@@ -688,10 +801,10 @@ class FastMarkdown:
                     processed.append(lead + rest)
                 else:
                     processed.append(ln)
-            
+
             content = "\n".join(processed)
             content = re.sub(r"\s*(---\n)+", "\n\n---\n", content)
-            
+
             return content
         except Exception:
             return content
@@ -724,5 +837,3 @@ def main() -> List[str]:
 
 if __name__ == "__main__":
     main()
-
-
