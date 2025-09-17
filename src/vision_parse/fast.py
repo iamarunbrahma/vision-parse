@@ -1,9 +1,9 @@
 import argparse
 import logging
 import re
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+from pydantic import BaseModel
 
 from pdfminer.high_level import extract_pages
 from pdfminer.layout import LAParams, LTChar, LTTextContainer, LTTextLine
@@ -98,16 +98,14 @@ def _is_italic_fontname(name: str) -> bool:
     return any(mark in name_low for mark in ("italic", "oblique"))
 
 
-@dataclass
-class ListState:
+class ListState(BaseModel):
     """Lightweight state for list parsing."""
 
     kind: str = "none"  # 'none' | 'ordered' | 'unordered'
     indent_level: int = 0
 
 
-@dataclass
-class PageFeatures:
+class PageFeatures(BaseModel):
     """Container for pre-extracted page features from pdfplumber."""
 
     tables: List[Dict[str, Any]]
@@ -115,9 +113,7 @@ class PageFeatures:
     horizontal_lines: List[Tuple[float, float, float, float]]
 
 
-class FontSizeAnalyzer:
-    """Deprecated: replaced by threshold-based header level mapping."""
-    pass
+ 
 
 
  
