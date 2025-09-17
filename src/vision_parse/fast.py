@@ -114,19 +114,35 @@ class PageFeatures:
     horizontal_lines: List[Tuple[float, float, float, float]]
 
 
-class FontSizeAnalyzer:
-    """Analyze font sizes to infer header levels and body size."""
+class HeaderFooterDetector:
+    """Detect and filter out headers and footers based on position and repetition."""
+    
+    def __init__(self, page_height_threshold: float = 0.1):
+        self.header_threshold = page_height_threshold  # Top 10% of page
+        self.footer_threshold = 1.0 - page_height_threshold  # Bottom 10% of page
+        self.min_pages_for_pattern = 2  # Minimum pages to consider something a header/footer
+    
+    def is_likely_header_footer(self, bbox: Tuple[float, float, float, float], 
+                               page_height: float, text: str) -> bool:
+        """Check if text position and content suggest header/footer."""
+        _, y0, _, y1 = bbox
+        y_ratio_top = (page_height - y1) / page_height  # Distance from top
+        y_ratio_bottom = y0 / page_height  # Distance from bottom
+        
+        # Check position
+        is_in_header_area = y_ratio_top <= self.header_threshold
+        is_in_footer_area = y_ratio_bottom <= self.header_threshold
+        
+        # Check content patterns (page numbers, common header/footer text)
+        text_lower = text.lower().strip()
+        is_page_number = bool(re.match(r'^\d+$', text.strip()))
+        is_common_footer = any(word in text_lower for word in ['page', 'chapter', '©', 'copyright'])
+        
+        return (is_in_header_area or is_in_footer_area) and (is_page_number or is_common_footer or len(text.strip()) < 50)
 
-    def build_header_level_map(self, lines: List[LTTextLine]) -> Dict[float, int]:
-        """Build a mapping from font size to header level."""
-        sizes: List[float] = []
-        for line in lines:
-            sizes.extend(_line_font_sizes(line))
-        unique = sorted({s for s in sizes}, reverse=True)
-        level_map: Dict[float, int] = {}
-        for idx, size in enumerate(unique[:6]):
-            level_map[size] = idx + 1
-        return level_map
+
+class FontSizeAnalyzer:
+    """Simple font size analyzer for header detection."""
 
     def estimate_body_size(self, lines: List[LTTextLine]) -> float:
         """Estimate the median body font size for a page."""
@@ -136,6 +152,10 @@ class FontSizeAnalyzer:
         if not sizes:
             return 12.0
         return float(median(sorted(sizes)))
+    
+    def is_header_size(self, font_size: float, body_size: float) -> bool:
+        """Check if font size indicates header text (significantly larger than body)."""
+        return font_size > body_size + 2.0  # At least 2pt larger than body text
 
 
  
@@ -148,6 +168,7 @@ class FastMarkdown:
         """Initialize extractor with a PDF path."""
         self.pdf_path = pdf_path
         self._font_analyzer = FontSizeAnalyzer()
+        self._header_footer_detector = HeaderFooterDetector()
 
     def extract(self) -> List[str]:
         """Extract and return a list of markdown strings per page."""
@@ -172,7 +193,6 @@ class FastMarkdown:
                 tqdm(layouts, desc="Extracting markdown from pages")
             ):
                 lines = self._collect_text_lines(layout)
-                header_map = self._font_analyzer.build_header_level_map(lines)
                 body_size = self._font_analyzer.estimate_body_size(lines)
                 page_height = float(layout.bbox[3])
                 pf = page_features[page_index] if page_index < len(page_features) else PageFeatures([], [], [])
@@ -180,7 +200,6 @@ class FastMarkdown:
                 items = self._build_items(lines, page_tables, page_height)
                 page_md = self._build_page_markdown_from_items(
                     items,
-                    header_map,
                     body_size,
                     page_height,
                     pf.hyperlinks,
@@ -315,7 +334,6 @@ class FastMarkdown:
     def _build_page_markdown_from_items(
         self,
         items: List[Dict[str, Any]],
-        header_map: Dict[float, int],
         body_size: float,
         page_height: float,
         page_hyperlinks: List[Dict[str, Any]],
@@ -391,7 +409,7 @@ class FastMarkdown:
                     markdown_lines.append("")
 
             max_size = max(sizes) if sizes else 0.0
-            level = self._header_level_for_size(max_size, header_map)
+            is_header_size = self._font_analyzer.is_header_size(max_size, body_size)
 
             total_chars = max(len(sizes), 1)
             bold_ratio = sum(1 for n in names if _is_bold_fontname(n)) / float(total_chars)
@@ -406,14 +424,17 @@ class FastMarkdown:
             is_ordered = _is_ordered_item(text)
             contains_brackets = "[" in text and ")" in text
 
+            # Skip header/footer text
+            if self._header_footer_detector.is_likely_header_footer(it["bbox"], page_height, text):
+                continue
+            
             header_ok = (
-                level > 0
+                is_header_size
                 and not is_bullet_like
                 and not is_ordered
                 and not contains_brackets
                 and not ends_punct
                 and word_count <= 12
-                and size_delta >= 2.0
             )
 
             indent_level = 0
@@ -444,7 +465,14 @@ class FastMarkdown:
                 if code_block_open:
                     markdown_lines.append("```")
                     code_block_open = False
-                hlevel = min(level, 3)
+                # Simple header level based on font size difference
+                size_diff = max_size - body_size
+                if size_diff >= 6.0:
+                    hlevel = 1
+                elif size_diff >= 4.0:
+                    hlevel = 2
+                else:
+                    hlevel = 3
                 candidate = f"{'#' * hlevel} {text}"
                 def _norm_header(s: str) -> str:
                     return re.sub(r"\W+", " ", s).strip().lower()
@@ -594,16 +622,16 @@ class FastMarkdown:
         )
 
     def _looks_like_code(self, text: str, fontnames: List[str]) -> bool:
-        if self._is_monospace_family(fontnames) and len(text) >= 10:
+        """Simple code detection based on monospace fonts and indentation."""
+        # Primary indicator: monospace font
+        if self._is_monospace_family(fontnames):
             return True
-        patterns = [
-            r"^(?:from|import|def|class|if|for|while|try|except|with)\b",
-            r"[{;}\[\]()]",
-            r"^\s{2,}",
-            r"^(?:#include|using|namespace|template|public|private|protected)\b",
-            r"^<\w+.*>$",
-        ]
-        return any(re.search(p, text) for p in patterns)
+        
+        # Secondary indicator: significant indentation (4+ spaces)
+        if text.startswith('    ') or text.startswith('\t'):
+            return True
+            
+        return False
 
     @staticmethod
     def _table_to_markdown(table: List[List[Optional[str]]]) -> str:
@@ -641,26 +669,21 @@ class FastMarkdown:
 
     @staticmethod
     def _normalize_cell_text(text: str) -> str:
-        """Normalize common PDF glyph duplication artifacts and whitespace in table cells.
-
-        Compress words that appear fully doubled per character (e.g.,
-        'FFeeaattuurree' -> 'Feature'). Also collapse internal whitespace/newlines.
-        """
+        """Normalize PDF extraction artifacts in table cells."""
         if not text:
             return ""
-
-        def compress_word(word: str) -> str:
-            if len(word) < 2:
-                return word
-            w = " ".join(word.split())  # collapse any internal whitespace/newlines
-            if len(w) % 2 == 0:
-                pairs = [w[i : i + 2] for i in range(0, len(w), 2)]
-                if all(len(p) == 2 and p[0] == p[1] for p in pairs):
-                    return "".join(p[0] for p in pairs)
-            return w
-
-        cleaned = " ".join(text.split())
-        return " ".join(compress_word(tok) for tok in cleaned.split())
+        
+        # Collapse excessive whitespace and newlines
+        cleaned = re.sub(r'\s+', ' ', text.strip())
+        
+        # Remove common PDF artifacts like zero-width characters
+        cleaned = re.sub(r'[\u200b-\u200d\ufeff]', '', cleaned)
+        
+        # Fix common encoding issues
+        cleaned = cleaned.replace('\ufeff', '')  # BOM
+        cleaned = cleaned.replace('\u00a0', ' ')  # Non-breaking space
+        
+        return cleaned
 
     @staticmethod
     def _normalize_task_checkbox(text: str) -> str:
@@ -703,19 +726,6 @@ class FastMarkdown:
                     return f"[{clean}]({uri})"
         return text
 
-    @staticmethod
-    def _header_level_for_size(size: float, level_map: Dict[float, int]) -> int:
-        if not level_map:
-            return 0
-        if size in level_map:
-            return level_map[size]
-        larger = [s for s in level_map if s >= size]
-        smaller = [s for s in level_map if s < size]
-        if larger:
-            return level_map[min(larger, key=lambda s: s - size)]
-        if smaller:
-            return level_map[max(smaller, key=lambda s: size - s)]
-        return 0
 
     @staticmethod
     def _reset_list_state(state: ListState) -> None:
@@ -731,9 +741,12 @@ class FastMarkdown:
 
     @staticmethod
     def _post_process(content: str) -> str:
+        """Basic whitespace cleanup."""
         try:
+            # Collapse excessive newlines
             content = re.sub(r"\n{3,}", "\n\n", content)
             content = re.sub(r"^\n", "", content)
+            
             # Collapse excessive spaces but preserve leading indentation
             lines = content.split("\n")
             processed: List[str] = []
@@ -741,30 +754,15 @@ class FastMarkdown:
                 m = re.match(r"^(\s*)(.*)$", ln)
                 if m:
                     lead, rest = m.group(1), m.group(2)
+                    rest = re.sub(r" {2,}", " ", rest)
+                    processed.append(lead + rest)
                 else:
-                    lead, rest = "", ln
-                rest = re.sub(r" {2,}", " ", rest)
-                processed.append(lead + rest)
+                    processed.append(ln)
+            
             content = "\n".join(processed)
             content = re.sub(r"\s*(---\n)+", "\n\n---\n", content)
-            # Suppress label-only bullet echoes following label-with-description bullets
-            lines = content.split("\n")
-            seen_labels: set[str] = set()
-            def _norm(s: str) -> str:
-                return re.sub(r"\W+", " ", s).strip().lower()
-            out: List[str] = []
-            for ln in lines:
-                m_desc = re.match(r"^\s*-\s+([^:]+):\s*", ln)
-                if m_desc:
-                    seen_labels.add(_norm(m_desc.group(1)))
-                    out.append(ln)
-                    continue
-                m_label = re.match(r"^\s*-\s+([^:]+)\s*$", ln)
-                if m_label and _norm(m_label.group(1)) in seen_labels:
-                    # Skip echo line
-                    continue
-                out.append(ln)
-            return "\n".join(out)
+            
+            return content
         except Exception:
             return content
 
