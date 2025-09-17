@@ -16,6 +16,9 @@ BULLET_CHARS = "•◦▪▫●○*·–—-"
 LIST_INDENT_PX = 24.0
 HEADER_MARGIN = 50.0
 FOOTER_MARGIN = 50.0
+# Heuristics for detecting horizontal rules drawn as vector lines
+HRULE_MIN_WIDTH_RATIO = 0.7  # relative to text span width on the page
+HRULE_MIN_SEPARATION = 6.0   # minimum vertical gap to consider a distinct hr
 _logger = logging.getLogger(__name__)
 
 
@@ -157,7 +160,12 @@ class FastMarkdown:
                 for _page_index, plumber_page in enumerate(plumber_pdf.pages):
                     # Tables
                     page_tables: List[Dict[str, Any]] = []
-                    for table in plumber_page.find_tables():
+                    # Deduplicate overlapping chars (e.g., fill+stroke) before table detection
+                    try:
+                        dedup_page = plumber_page.dedupe_chars(tolerance=1, extra_attrs=())
+                    except Exception:
+                        dedup_page = plumber_page
+                    for table in dedup_page.find_tables():
                         try:
                             content = table.extract()
                             bbox = table.bbox
@@ -227,7 +235,9 @@ class FastMarkdown:
     def _is_bullet_marker(text: str) -> bool:
         """Return True for typical bullet markers at the start of a line."""
         s = text.lstrip()
-        return s.startswith(tuple(BULLET_CHARS)) or s.startswith("- ")
+        return (
+            s.startswith(tuple(BULLET_CHARS)) or s.startswith("- ") or s.startswith("o ")
+        )
 
     @staticmethod
     def _normalize_bullet_to_md(text: str) -> str:
@@ -249,6 +259,41 @@ class FastMarkdown:
     ) -> bool:
         """True if two rectangles overlap (inclusive)."""
         return not (a[2] <= b[0] or a[0] >= b[2] or a[3] <= b[1] or a[1] >= b[3])
+
+    @staticmethod
+    def _normalize_leading_markers(text: str) -> str:
+        """Collapse repeated leading list markers like '1. 1.' or '• • '.
+        """
+        if not text:
+            return text
+
+        s = text
+        ordered_pat = re.compile(r"^\s*\d+\s*[.)]\s*")
+        bullet_pat = re.compile(rf"^\s*(?:[{re.escape(BULLET_CHARS)}]|-|–|—|o)\s*")
+
+        # Ordered markers
+        m = ordered_pat.match(s)
+        if m:
+            first = m.group(0)
+            rest = s[m.end():]
+            m2 = ordered_pat.match(rest)
+            while m2:
+                rest = rest[m2.end():]
+                m2 = ordered_pat.match(rest)
+            return first + rest
+
+        # Bullet markers
+        m = bullet_pat.match(s)
+        if m:
+            first = m.group(0)
+            rest = s[m.end():]
+            m2 = bullet_pat.match(rest)
+            while m2:
+                rest = rest[m2.end():]
+                m2 = bullet_pat.match(rest)
+            return first + rest
+
+        return s
 
     @staticmethod
     def _plumber_to_miner_bbox(
@@ -363,6 +408,7 @@ class FastMarkdown:
             if lvl > indent_level:
                 del list_counters[lvl]
         list_counters[indent_level] = list_counters.get(indent_level, 0) + 1
+        text_raw = self._normalize_leading_markers(text_raw)
         content = re.sub(r"^\s*\d+\s*[.)]\s*", "", text_raw).strip()
         candidate = _indent(indent_level) + f"{list_counters[indent_level]}. {content}"
         if candidate != (last_emitted_line or ""):
@@ -387,6 +433,7 @@ class FastMarkdown:
         if list_state.kind != "unordered" or list_state.anchor_left is None:
             list_state.anchor_left = left
         indent_level = self._compute_list_level(list_state, left)
+        text_raw = self._normalize_leading_markers(text_raw)
         content = self._normalize_bullet_to_md(text_raw)
         candidate = _indent(indent_level) + content
         if candidate != (last_emitted_line or ""):
@@ -462,6 +509,7 @@ class FastMarkdown:
         last_emitted_line: Optional[str] = None
         emitted_headers: set[str] = set()
         list_counters: Dict[int, int] = {}
+        pending_list_marker: Optional[Tuple[str, float]] = None
 
         link_rects: List[Tuple[Tuple[float, float, float, float], str]] = [
             (self._plumber_to_miner_bbox(lk["bbox"], page_height), lk["uri"])
@@ -471,6 +519,12 @@ class FastMarkdown:
         line_rects_miner: List[Tuple[float, float, float, float]] = [
             self._plumber_to_miner_bbox(b, page_height) for b in page_lines
         ]
+
+        # Prepare horizontal rule candidates based on vector lines
+        text_x0s = [it["bbox"][0] for it in items if it["type"] == "text"]
+        text_x1s = [it["bbox"][2] for it in items if it["type"] == "text"]
+        span_width = (max(text_x1s) - min(text_x0s)) if text_x0s and text_x1s else 0.0
+        hrule_ys = self._detect_hrules(line_rects_miner, span_width)
 
         for item in items:
             if item["type"] == "table":
@@ -490,6 +544,7 @@ class FastMarkdown:
             font_sizes = _font_sizes(text_line)
             font_names = _font_names(text_line)
             text_raw = (text_line.get_text() or "").replace("\n", " ")
+            text_raw = self._normalize_leading_markers(text_raw)
             text = _norm_ws(text_raw)
 
             if not text:
@@ -515,6 +570,7 @@ class FastMarkdown:
                     and not code_block_open
                 ):
                     markdown_lines.append("")
+                    # New paragraph
 
             max_size = max(font_sizes) if font_sizes else 0.0
 
@@ -569,6 +625,20 @@ class FastMarkdown:
             if self._text_bbox_has_strikethrough(item["bbox"], line_rects_miner):
                 text = f"~~{text}~~"
 
+            # If there is a detected wide vector line between items, emit hrule
+            if last_y1 is not None and hrule_ys:
+                current_mid_y = (item["bbox"][1] + item["bbox"][3]) / 2.0
+                lower = min(last_y1, current_mid_y)
+                upper = max(last_y1, current_mid_y)
+                hits = [y for y in hrule_ys if lower + 1.0 <= y <= upper - 1.0]
+                if hits:
+                    if code_block_open:
+                        markdown_lines.append("```")
+                        code_block_open = False
+                    markdown_lines.append("---")
+                    # consume emitted hrule positions
+                    hrule_ys = [y for y in hrule_ys if y not in hits]
+
             if _is_hr(text):
                 if code_block_open:
                     markdown_lines.append("```")
@@ -585,6 +655,17 @@ class FastMarkdown:
                     header_level,
                     last_emitted_line,
                 )
+            elif pending_list_marker and pending_list_marker[0] == "ordered":
+                code_block_open, last_emitted_line = self._emit_ordered(
+                    markdown_lines,
+                    code_block_open,
+                    list_state,
+                    list_counters,
+                    pending_list_marker[1],
+                    text,
+                    last_emitted_line,
+                )
+                pending_list_marker = None
             elif self._is_ordered_marker(text):
                 code_block_open, last_emitted_line = self._emit_ordered(
                     markdown_lines,
@@ -595,6 +676,16 @@ class FastMarkdown:
                     text,
                     last_emitted_line,
                 )
+            elif pending_list_marker and pending_list_marker[0] == "unordered":
+                code_block_open, last_emitted_line = self._emit_bullet(
+                    markdown_lines,
+                    code_block_open,
+                    list_state,
+                    pending_list_marker[1],
+                    text,
+                    last_emitted_line,
+                )
+                pending_list_marker = None
             elif self._is_bullet_marker(text):
                 code_block_open, last_emitted_line = self._emit_bullet(
                     markdown_lines,
@@ -622,6 +713,37 @@ class FastMarkdown:
                     )
                 )
             else:
+                # Detect standalone list marker lines and merge with next content
+                if re.fullmatch(r"\s*\d+\s*[.)]\s*", text_raw):
+                    pending_list_marker = ("ordered", left)
+                    prev_line_text = text
+                    last_y1 = y1
+                    last_line_font_sizes = font_sizes
+                    continue
+                if re.fullmatch(rf"\s*(?:[{re.escape(BULLET_CHARS)}]|-|–|—|o)\s*", text_raw):
+                    pending_list_marker = ("unordered", left)
+                    prev_line_text = text
+                    last_y1 = y1
+                    last_line_font_sizes = font_sizes
+                    continue
+
+                # Nested list fallback: treat deeper indent as sub-bullet
+                if list_state.kind != "none" and list_state.anchor_left is not None:
+                    peek_level = self._compute_list_level(list_state, left)
+                    if peek_level > list_state.indent_level:
+                        code_block_open, last_emitted_line = self._emit_bullet(
+                            markdown_lines,
+                            code_block_open,
+                            list_state,
+                            left,
+                            text,
+                            last_emitted_line,
+                        )
+                        prev_line_text = text
+                        last_y1 = y1
+                        last_line_font_sizes = font_sizes
+                        continue
+
                 decorated = self._auto_linkify(text)
                 if is_boldish and is_italicish:
                     decorated = f"***{decorated}***"
@@ -629,6 +751,18 @@ class FastMarkdown:
                     decorated = f"**{decorated}**"
                 elif is_italicish:
                     decorated = f"*{decorated}*"
+                # Suppress plain-line duplicates that repeat the content of the last list item
+                if last_emitted_line:
+                    m_ord = re.match(r"^\s*\d+\.\s+(.*)$", last_emitted_line)
+                    m_bul = re.match(r"^\s*-\s+(.*)$", last_emitted_line)
+                    content_prev = (m_ord or m_bul).group(1).strip() if (m_ord or m_bul) else None
+                    if content_prev and _norm_ws(decorated.strip("*` ")) == _norm_ws(content_prev):
+                        # skip duplicate label repeated after numbered/bullet item
+                        prev_line_text = text
+                        last_y1 = y1
+                        last_line_font_sizes = font_sizes
+                        continue
+
                 if decorated != (last_emitted_line or ""):
                     markdown_lines.append(decorated)
                     last_emitted_line = decorated
@@ -727,6 +861,7 @@ class FastMarkdown:
 
         return cleaned
 
+
     @staticmethod
     # (unused task checkbox normalizer removed)
 
@@ -769,6 +904,31 @@ class FastMarkdown:
                 if clean:
                     return f"[{clean}]({uri})"
         return text
+
+    @staticmethod
+    def _extract_colon_label(text: str) -> Optional[str]:
+        # Deprecated and intentionally unused. Kept temporarily for backward compatibility.
+        return None
+
+    @staticmethod
+    def _detect_hrules(
+        line_rects: List[Tuple[float, float, float, float]],
+        span_width: float,
+    ) -> List[float]:
+        """Detect y-positions of wide horizontal lines to render as '---'."""
+        if span_width <= 0:
+            return []
+        min_width = span_width * HRULE_MIN_WIDTH_RATIO
+        ys: List[float] = []
+        for x0, y0, x1, y1 in line_rects:
+            if abs(y1 - y0) <= 1.0 and (x1 - x0) >= min_width:
+                ys.append((y0 + y1) / 2.0)
+        ys.sort()
+        deduped: List[float] = []
+        for y in ys:
+            if not deduped or abs(y - deduped[-1]) >= HRULE_MIN_SEPARATION:
+                deduped.append(y)
+        return deduped
 
     @staticmethod
     def _reset_list_state(state: ListState) -> None:
